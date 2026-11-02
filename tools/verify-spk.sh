@@ -59,6 +59,33 @@ else
   fail=1
 fi
 
+# The shipped binary must match the declared architecture and be static
+# (musl) so it runs on any DSM 7.1+ regardless of the NAS toolchain.
+declared=$(sed -n 's/^arch="\(.*\)"$/\1/p' "${WORK}/INFO")
+python3 - "${WORK}/payload/bin/synoterm" "${declared}" <<'ELF'
+import struct, sys
+path, declared = sys.argv[1], sys.argv[2]
+data = open(path, "rb").read(64)
+if data[:4] != b"\x7fELF":
+    print(f"  FAIL {path} is not an ELF binary"); sys.exit(1)
+machine = struct.unpack_from("<H", data, 18)[0]
+expected = {"x86_64": 62, "armv8": 183, "armv7": 40}.get(declared)
+if expected is None:
+    print(f"  WARN unknown arch {declared}; skipping ELF check"); sys.exit(0)
+if machine != expected:
+    print(f"  FAIL ELF machine {machine} does not match arch={declared} ({expected})"); sys.exit(1)
+print(f"  ok   ELF machine {machine} matches arch={declared}")
+ELF
+[ $? -eq 0 ] || fail=1
+
+if command -v readelf >/dev/null 2>&1; then
+  if readelf -l "${WORK}/payload/bin/synoterm" 2>/dev/null | grep -q INTERP; then
+    echo "  WARN binary has a dynamic interpreter (not static musl)"
+  else
+    echo "  ok   statically linked"
+  fi
+fi
+
 # The setuid tool must be declared with the same path the payload ships.
 if ! grep -q '"relpath": "bin/synoterm"' "${WORK}/conf/privilege"; then
   echo "  MISS conf/privilege tool relpath"
