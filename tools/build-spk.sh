@@ -54,7 +54,8 @@ PAYLOAD="${STAGING}/payload"
 OUT="${BUILD}/synoterm-${SPK_VERSION}-${ARCH}.spk"
 
 echo "==> zig build (${ZIG_TARGET})"
-zig build -Doptimize=ReleaseSmall -Dtarget="${ZIG_TARGET}"
+# Own prefix: leave zig-out/bin/synoterm as the host build for local tests.
+zig build -Doptimize=ReleaseSmall -Dtarget="${ZIG_TARGET}" -p "${BUILD}/bin-${ARCH}"
 
 echo "==> frontend bundle"
 if [ ! -d frontend/node_modules ]; then
@@ -66,7 +67,7 @@ echo "==> staging"
 rm -rf "${STAGING}"
 mkdir -p "${PAYLOAD}/bin" "${PAYLOAD}/nginx" "${PAYLOAD}/ui/web" "${PAYLOAD}/ui/images"
 
-cp "${ROOT}/zig-out/bin/synoterm" "${PAYLOAD}/bin/synoterm"
+cp "${BUILD}/bin-${ARCH}/bin/synoterm" "${PAYLOAD}/bin/synoterm"
 chmod 755 "${PAYLOAD}/bin/synoterm"
 
 cp "${ROOT}/packaging/dsm7/nginx/synoterm.conf" "${PAYLOAD}/nginx/synoterm.conf"
