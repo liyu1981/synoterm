@@ -116,7 +116,9 @@ const browser = await playwright.chromium.launch({
 });
 
 try {
-  const page = await browser.newPage();
+  // Clipboard permissions so the paste/copy shortcuts can be exercised.
+  const context = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+  const page = await context.newPage();
   page.on("pageerror", (error) => failures.push(`pageerror: ${error}`));
 
   await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: "load" });
@@ -206,6 +208,50 @@ try {
   if (fontSizeAfterReload !== 18) failures.push(`font size not restored after reload: ${fontSizeAfterReload}`);
   // Leave the profile at defaults for the next run.
   await page.evaluate(() => window.localStorage.removeItem("synoterm.settings.v1"));
+
+  // Header layout: the appearance button sits on the right, after the status.
+  const header = await page.evaluate(() => {
+    const settings = document.querySelector("#header-right #settings");
+    const status = document.querySelector("#status");
+    if (!settings || !status) return { ok: false };
+    return {
+      ok: true,
+      settingsRightOfStatus: settings.getBoundingClientRect().left >= status.getBoundingClientRect().left,
+    };
+  });
+  if (!header.ok) failures.push("#settings is not inside #header-right");
+  else if (!header.settingsRightOfStatus) failures.push("#settings is not to the right of #status");
+
+  // Clipboard: paste (Ctrl+V and Ctrl+Shift+V) must reach the shell, and
+  // Ctrl+C must copy the selection instead of sending ^C.
+  await page.click(".terminal-pane.active");
+  await page.evaluate(() => navigator.clipboard.writeText("echo E2E_PASTE_CTRL_V"));
+  await page.keyboard.press("Control+V");
+  await page.waitForTimeout(300);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(700);
+  let clipScreen = await page.evaluate(() => document.querySelector(".terminal-pane.active .xterm-rows")?.innerText || "");
+  if (!clipScreen.includes("E2E_PASTE_CTRL_V")) failures.push("Ctrl+V did not paste into the shell");
+
+  await page.evaluate(() => navigator.clipboard.writeText("echo E2E_PASTE_CTRL_SHIFT_V"));
+  await page.keyboard.press("Control+Shift+V");
+  await page.waitForTimeout(300);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(700);
+  clipScreen = await page.evaluate(() => document.querySelector(".terminal-pane.active .xterm-rows")?.innerText || "");
+  if (!clipScreen.includes("E2E_PASTE_CTRL_SHIFT_V")) failures.push("Ctrl+Shift+V did not paste into the shell");
+
+  await page.evaluate(() => {
+    navigator.clipboard.writeText("");
+    window.synoterm.active.term.selectAll();
+  });
+  await page.keyboard.press("Control+C");
+  await page.waitForTimeout(300);
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  if (!copied || copied.length === 0) failures.push("Ctrl+C with a selection did not copy it");
+  if (await page.evaluate(() => window.synoterm.active.term.hasSelection())) {
+    failures.push("Ctrl+C did not clear the selection after copying");
+  }
 
   // Optional slow check (SYNOTERM_E2E_SLOW=1): a session must survive idling
   // longer than the HTTP header timeout (30s).

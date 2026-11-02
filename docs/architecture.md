@@ -119,6 +119,15 @@ Two hard-won rules, each guarding against a bug seen on a real NAS:
   includes the VT snapshot, so the user lands exactly where they left off.
 * The stylesheet is imported as text and injected by the bundle, so a DSM
   upgrade cannot leave a stale `<link>` behind (a real bug in similar packages).
+* **Clipboard**: xterm.js maps `Ctrl+V` to `^V` and calls `preventDefault()`, so
+  the browser never performed a paste (this was a real bug report). The custom
+  key handler now returns `false` for plain `Ctrl/Cmd+V` *without* preventing the
+  default, which lets Chromium paste into xterm's hidden textarea — no clipboard
+  permission required. `Ctrl+Shift+V` and `Shift+Insert` are handled explicitly
+  via `navigator.clipboard.readText()` (needs a user gesture; the ExtJS wrapper
+  grants the iframe `clipboard-read`/`clipboard-write`), `Ctrl/Cmd+C` copies a
+  selection and clears it, and a document-level `paste` listener forwards pastes
+  that land outside the terminal.
 * **Appearance settings** (`frontend/src/settings.js`): font family, size and
   line height, with URL parameters (`?fontFamily=…&fontSize=…&lineHeight=…`) >
   `localStorage` (`synoterm.settings.v1`) > defaults. Values are sanitised and

@@ -12,9 +12,19 @@
         <div id="tabs" role="tablist"></div>
         <div id="tab-actions">
           <button id="new-tab" type="button" title="New terminal (Ctrl+Shift+T)">+</button>
-          <button id="settings" type="button" title="Terminal appearance">Aa</button>
         </div>
-        <div id="status"><span id="status-text">connecting…</span></div>
+        <div id="header-right">
+          <div id="status"><span id="status-text">connecting…</span></div>
+          <button
+            id="settings"
+            type="button"
+            title="Terminal appearance (font, size, line height)"
+            aria-haspopup="true"
+            aria-expanded="false"
+          >
+            Aa
+          </button>
+        </div>
       </header>
       <main id="terminal-host"></main>
       <div id="settings-panel" class="settings-panel" hidden>

@@ -113,8 +113,13 @@ sudo /var/packages/synoterm/target/contrib/diagnose.sh
   DSM's glibc (7.1 ships 2.26, while a native build needs 2.36+). No Node.js, no
   Python, no runtime dependencies on the NAS.
 * **Appearance that fits your eyes.** Font family, size and line height are
-  adjustable from the `Aa` panel (persisted per browser) or from the URL:
+  adjustable from the `Aa` button on the right of the header (persisted per
+  browser) or from the URL:
   `?fontFamily=Fira+Code&fontSize=16&lineHeight=1.4`.
+* **Normal clipboard behaviour.** `Ctrl/Cmd+V` pastes (also `Ctrl+Shift+V` and
+  `Shift+Insert`), `Ctrl/Cmd+C` copies a selection — and only sends `^C` when
+  nothing is selected — and pasting works even when focus is on the DSM window
+  chrome rather than the terminal.
 * **Small surface, explicit lifecycle.** xterm.js renders, the backend owns the
   real PTY, and a session ends when its socket ends (v1 policy). Persistent
   sessions via `libghostty-vt` are designed and deliberately deferred.

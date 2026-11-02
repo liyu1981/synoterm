@@ -119,10 +119,20 @@ body {
   align-items: center;
 }
 
+/* Status and the appearance button live together on the right of the header. */
+#header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding-left: 8px;
+  min-width: 0;
+}
+
 #settings {
   width: 30px;
   height: 26px;
-  margin-left: 4px;
+  flex: 0 0 auto;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: transparent;
@@ -156,13 +166,13 @@ body {
 }
 
 #status {
-  margin-left: auto;
   display: flex;
   align-items: center;
-  padding-right: 4px;
   color: var(--fg-dim);
   font-size: 12px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 #status.error #status-text {

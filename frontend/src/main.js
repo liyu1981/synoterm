@@ -396,6 +396,74 @@ class Session {
     this.term.onResize(({ cols, rows }) => this.sendControl({ type: "resize", cols, rows }));
 
     this.resizeObserver = new ResizeObserver(() => this.refit());
+    this.attachClipboard();
+  }
+
+  /**
+   * Clipboard support.
+   *
+   * xterm.js relies on the browser's own paste event, which needs its hidden
+   * textarea to have focus — inside a DSM window (iframe) that is often not the
+   * case, so Ctrl+V did nothing. The terminal shortcuts are handled explicitly:
+   *
+   *   Ctrl/Cmd+Shift+V, Shift+Insert  → paste from the clipboard
+   *   Ctrl/Cmd+C with a selection     → copy it (without a selection it stays ^C)
+   *   Ctrl/Cmd+V                      → native paste when the terminal is focused
+   *
+   * `navigator.clipboard` needs a user gesture (a key press qualifies) and, in
+   * an iframe, the clipboard permissions policy — the ExtJS wrapper grants it.
+   */
+  attachClipboard() {
+    this.term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== "keydown") return true;
+      const mod = event.ctrlKey || event.metaKey;
+      const key = (event.key || "").toLowerCase();
+
+      // Plain Ctrl/Cmd+V: xterm.js would translate it to ^V and preventDefault,
+      // which is why the browser never pasted anything. Hand the event back to
+      // the browser: it pastes into xterm's hidden textarea, so no clipboard
+      // permission is involved.
+      if (mod && !event.shiftKey && !event.altKey && key === "v") {
+        return false;
+      }
+
+      // Explicit paste shortcuts for when the native path is unavailable
+      // (clipboard API needs a user gesture and, in an iframe, the policy).
+      const wantsPaste = (mod && event.shiftKey && key === "v") || (event.shiftKey && event.key === "Insert");
+      if (wantsPaste) {
+        event.preventDefault();
+        this.readClipboardAndPaste();
+        return false;
+      }
+
+      if (mod && !event.shiftKey && key === "c" && this.term.hasSelection()) {
+        event.preventDefault();
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(this.term.getSelection()).catch(() => {});
+        }
+        this.term.clearSelection();
+        return false;
+      }
+      return true;
+    });
+  }
+
+  readClipboardAndPaste() {
+    if (!navigator.clipboard || !navigator.clipboard.readText) return;
+    navigator.clipboard.readText().then(
+      (text) => {
+        if (text) this.pasteText(text);
+      },
+      () => {
+        /* permission denied: the browser's own paste event still applies */
+      },
+    );
+  }
+
+  pasteText(text) {
+    if (!text) return;
+    this.term.paste(text);
+    this.term.focus();
   }
 
   get element() {
@@ -606,6 +674,25 @@ class TabManager {
     this.counter = 0;
 
     document.getElementById("new-tab").addEventListener("click", () => this.newTab());
+
+    // If the paste event does not land in xterm's textarea (focus in the DSM
+    // window chrome, the settings panel, …) forward it to the active terminal.
+    document.addEventListener("paste", (event) => {
+      const session = this.active;
+      if (!session || this.panel && !this.panel.hidden) return;
+      const target = event.target;
+      if (target && session.element.contains(target)) return; // xterm handles it
+      const text = event.clipboardData ? event.clipboardData.getData("text") : "";
+      if (!text) return;
+      event.preventDefault();
+      session.pasteText(text);
+    });
+
+    // Clicking anywhere in the terminal surface must give the shell the keyboard.
+    document.getElementById("terminal-host").addEventListener("mousedown", () => {
+      requestAnimationFrame(() => this.active?.term.focus());
+    });
+    window.addEventListener("focus", () => this.active?.term.focus());
     this.initSettingsPanel();
     window.addEventListener("keydown", (event) => this.onKeydown(event));
     window.addEventListener("beforeunload", () => {
