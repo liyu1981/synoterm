@@ -6,6 +6,18 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 // stay visible and paint stray rows of characters over the screen.
 import xtermCss from "@xterm/xterm/css/xterm.css";
 import cssText from "./style.css";
+import {
+  DEFAULTS as FONT_DEFAULTS,
+  FONT_CHOICES,
+  LIMITS as FONT_LIMITS,
+  cssFontFamily,
+  loadSettings,
+  resetSettings,
+  sanitizeFontFamily,
+  sanitizeFontSize,
+  sanitizeLineHeight,
+  saveSettings,
+} from "./settings.js";
 
 /**
  * synoterm frontend: one xterm.js terminal per tab, each backed by its own
@@ -40,15 +52,32 @@ const THEME = {
   brightWhite: "#ffffff",
 };
 
-const TERM_OPTIONS = {
-  fontFamily: '"JetBrains Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace',
-  fontSize: 13,
-  lineHeight: 1.15,
-  cursorBlink: true,
-  scrollback: 10000,
-  allowProposedApi: true,
-  theme: THEME,
-};
+/** Current font settings; changed from the settings panel or ?font…= params. */
+let fontSettings = loadSettings();
+
+function termOptions() {
+  return {
+    fontFamily: cssFontFamily(fontSettings.fontFamily),
+    fontSize: fontSettings.fontSize,
+    lineHeight: fontSettings.lineHeight,
+    cursorBlink: true,
+    scrollback: 10000,
+    allowProposedApi: true,
+    theme: THEME,
+  };
+}
+
+/** Applies the current font settings to a live terminal and re-fits it. */
+function applyFont(term, fit) {
+  const options = termOptions();
+  term.options.fontFamily = options.fontFamily;
+  term.options.fontSize = options.fontSize;
+  term.options.lineHeight = options.lineHeight;
+  // Re-measure after the renderer picked up the new metrics: fit() computes the
+  // column count from the character cell, and a resize is what the PTY needs.
+  fit();
+  requestAnimationFrame(() => fit());
+}
 
 /** Base path of the app ("/synoterm" in DSM, "" in dev). */
 function appBase() {
@@ -199,7 +228,7 @@ class Session {
 
     this.pane = pane;
 
-    this.term = new Terminal(TERM_OPTIONS);
+    this.term = new Terminal(termOptions());
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     this.term.loadAddon(new WebLinksAddon());
@@ -368,6 +397,10 @@ class Session {
     this.manager.updateStatus();
   }
 
+  applyFontSettings() {
+    applyFont(this.term, () => this.refit());
+  }
+
   refit() {
     if (!this.pane.classList.contains("active")) return;
     if (this.pane.clientWidth === 0 || this.pane.clientHeight === 0) return;
@@ -414,6 +447,7 @@ class TabManager {
     this.counter = 0;
 
     document.getElementById("new-tab").addEventListener("click", () => this.newTab());
+    this.initSettingsPanel();
     window.addEventListener("keydown", (event) => this.onKeydown(event));
     window.addEventListener("beforeunload", () => {
       for (const tab of this.tabs) tab.close();
@@ -421,6 +455,10 @@ class TabManager {
   }
 
   onKeydown(event) {
+    if (event.key === "Escape" && !this.panel.hidden) {
+      this.toggleSettings(false);
+      return;
+    }
     if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return;
     if (event.key.toLowerCase() === "t") {
       event.preventDefault();
@@ -480,6 +518,88 @@ class TabManager {
     this.updateStatus();
   }
 
+  initSettingsPanel() {
+    this.panel = document.getElementById("settings-panel");
+    this.settingsButton = document.getElementById("settings");
+    this.familyInput = document.getElementById("set-font-family");
+    this.sizeInput = document.getElementById("set-font-size");
+    this.heightInput = document.getElementById("set-line-height");
+
+    const list = document.getElementById("font-choices");
+    for (const family of FONT_CHOICES) {
+      const option = document.createElement("option");
+      option.value = family;
+      list.appendChild(option);
+    }
+
+    this.settingsButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.toggleSettings();
+    });
+    document.getElementById("settings-close").addEventListener("click", () => this.toggleSettings(false));
+    document.getElementById("settings-reset").addEventListener("click", () => {
+      fontSettings = resetSettings();
+      this.syncSettingsInputs();
+      this.applyFontSettingsAll();
+    });
+
+    // Live preview while typing; persist once the field is left.
+    const liveUpdate = () => {
+      fontSettings = {
+        fontFamily: sanitizeFontFamily(this.familyInput.value),
+        fontSize: sanitizeFontSize(this.sizeInput.value),
+        lineHeight: sanitizeLineHeight(this.heightInput.value),
+      };
+      this.applyFontSettingsAll();
+    };
+    const persist = () => {
+      liveUpdate();
+      fontSettings = saveSettings(fontSettings);
+      this.syncSettingsInputs();
+    };
+    for (const input of [this.familyInput, this.sizeInput, this.heightInput]) {
+      input.addEventListener("input", liveUpdate);
+      input.addEventListener("change", persist);
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") persist();
+        if (event.key === "Escape") this.toggleSettings(false);
+        event.stopPropagation();
+      });
+    }
+
+    // Click outside or Escape closes the panel.
+    document.addEventListener("click", (event) => {
+      if (this.panel.hidden) return;
+      if (this.panel.contains(event.target) || this.settingsButton.contains(event.target)) return;
+      this.toggleSettings(false);
+    });
+
+    this.syncSettingsInputs();
+  }
+
+  syncSettingsInputs() {
+    this.familyInput.value = fontSettings.fontFamily;
+    this.sizeInput.min = String(FONT_LIMITS.fontSize.min);
+    this.sizeInput.max = String(FONT_LIMITS.fontSize.max);
+    this.sizeInput.value = String(fontSettings.fontSize);
+    this.heightInput.min = String(FONT_LIMITS.lineHeight.min);
+    this.heightInput.max = String(FONT_LIMITS.lineHeight.max);
+    this.heightInput.value = String(fontSettings.lineHeight);
+  }
+
+  toggleSettings(force) {
+    const show = force === undefined ? this.panel.hidden : force;
+    this.panel.hidden = !show;
+    this.settingsButton.setAttribute("aria-expanded", String(show));
+    if (show) {
+      this.syncSettingsInputs();
+      this.familyInput.focus();
+      this.familyInput.select();
+    } else {
+      this.active?.term.focus();
+    }
+  }
+
   renderTabs() {
     const container = document.getElementById("tabs");
     container.replaceChildren();
@@ -509,6 +629,11 @@ class TabManager {
       tab.addEventListener("click", () => this.select(session));
       container.appendChild(tab);
     }
+  }
+
+  applyFontSettingsAll() {
+    for (const session of this.tabs) session.applyFontSettings();
+    this.updateStatus();
   }
 
   updateTabState(session) {

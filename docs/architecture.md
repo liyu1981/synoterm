@@ -115,6 +115,13 @@ Two hard-won rules, each guarding against a bug seen on a real NAS:
   includes the VT snapshot, so the user lands exactly where they left off.
 * The stylesheet is imported as text and injected by the bundle, so a DSM
   upgrade cannot leave a stale `<link>` behind (a real bug in similar packages).
+* **Appearance settings** (`frontend/src/settings.js`): font family, size and
+  line height, with URL parameters (`?fontFamily=…&fontSize=…&lineHeight=…`) >
+  `localStorage` (`synoterm.settings.v1`) > defaults. Values are sanitised and
+  clamped (size 8–32, line height 1.0–2.5, family ≤ 200 chars, no control or
+  CSS-breaking characters). Changing them sets the xterm options, re-fits so the
+  PTY gets the new column count, and repaints; no webfonts are downloaded — the
+  family must exist on the device.
 
 ## 5. Security model
 

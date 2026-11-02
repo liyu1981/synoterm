@@ -35,6 +35,9 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
   **static musl** binaries; libc is embedded, so the binary does not depend on
   DSM's glibc (7.1 ships 2.26, while a native build needs 2.36+). No Node.js, no
   Python, no runtime dependencies on the NAS.
+* **Appearance that fits your eyes.** Font family, size and line height are
+  adjustable from the `Aa` panel (persisted per browser) or from the URL:
+  `?fontFamily=Fira+Code&fontSize=16&lineHeight=1.4`.
 * **Small surface, explicit lifecycle.** xterm.js renders, the backend owns the
   real PTY, and a session ends when its socket ends (v1 policy). Persistent
   sessions via `libghostty-vt` are designed and deliberately deferred.
@@ -44,7 +47,7 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
 | Piece | State |
 | --- | --- |
 | Zig backend (HTTP, WebSocket, PTY bridge, resize) | working, unit tested |
-| xterm.js frontend (tabs, reconnect, fit, status bar) | working, e2e tested in headless Chromium |
+| xterm.js frontend (tabs, reconnect, fit, status bar, font settings) | working, e2e tested in headless Chromium |
 | DSM package skeleton (`INFO`, `conf/privilege`, `conf/resource`, nginx, `ui/`) | written; both UI registration styles build |
 | DSM session auth (`authenticate.cgi` + group check) | implemented, needs on-device verification |
 | Multi-arch SPK build (`tools/build-spk.sh`) | working (x86_64 verified, armv8/armv7 cross-compiled) |

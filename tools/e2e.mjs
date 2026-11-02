@@ -184,6 +184,29 @@ try {
   }
   if (!statusProbe.body?.version) failures.push("/status did not report a server version");
 
+  // Appearance settings: font size must apply live (re-measuring the terminal)
+  // and survive a reload.
+  await page.click("#settings");
+  await page.fill("#set-font-size", "18");
+  await page.dispatchEvent("#set-font-size", "change");
+  await page.waitForTimeout(500);
+  const fontState = await page.evaluate(() => ({
+    fontSize: window.synoterm.active.term.options.fontSize,
+    stored: JSON.parse(window.localStorage.getItem("synoterm.settings.v1") || "{}"),
+  }));
+  if (fontState.fontSize !== 18) failures.push(`font size not applied: ${fontState.fontSize}`);
+  if (fontState.stored.fontSize !== 18) failures.push("font size was not persisted");
+
+  await page.reload({ waitUntil: "load" });
+  await page.waitForFunction(
+    () => document.querySelector("#status-text")?.textContent?.startsWith("connected"),
+    { timeout: 8000 },
+  );
+  const fontSizeAfterReload = await page.evaluate(() => window.synoterm.active.term.options.fontSize);
+  if (fontSizeAfterReload !== 18) failures.push(`font size not restored after reload: ${fontSizeAfterReload}`);
+  // Leave the profile at defaults for the next run.
+  await page.evaluate(() => window.localStorage.removeItem("synoterm.settings.v1"));
+
   // Optional slow check (SYNOTERM_E2E_SLOW=1): a session must survive idling
   // longer than the HTTP header timeout (30s).
   if (process.env.SYNOTERM_E2E_SLOW === "1") {

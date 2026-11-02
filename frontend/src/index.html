@@ -15,10 +15,35 @@
         <div id="tabs" role="tablist"></div>
         <div id="tab-actions">
           <button id="new-tab" type="button" title="New terminal (Ctrl+Shift+T)">+</button>
+          <button id="settings" type="button" title="Terminal appearance">Aa</button>
         </div>
         <div id="status"><span id="status-text">connecting…</span></div>
       </header>
       <main id="terminal-host"></main>
+      <div id="settings-panel" class="settings-panel" hidden>
+        <h2>Terminal appearance</h2>
+        <label for="set-font-family">Font family</label>
+        <input id="set-font-family" list="font-choices" spellcheck="false" autocomplete="off" />
+        <datalist id="font-choices"></datalist>
+        <p class="hint">Any font installed on this device. Spaces are fine.</p>
+
+        <label for="set-font-size">Font size</label>
+        <div class="row">
+          <input id="set-font-size" type="number" step="1" inputmode="numeric" />
+          <span class="unit">px</span>
+        </div>
+
+        <label for="set-line-height">Line height</label>
+        <div class="row">
+          <input id="set-line-height" type="number" step="0.05" inputmode="decimal" />
+          <span class="unit">×</span>
+        </div>
+
+        <div class="settings-actions">
+          <button id="settings-reset" type="button">Reset</button>
+          <button id="settings-close" type="button">Close</button>
+        </div>
+      </div>
     </div>
     <!-- Written by the packaging step (DSM mount path); empty in dev. -->
     <script src="./config.js"></script>
