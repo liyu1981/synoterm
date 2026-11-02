@@ -31,9 +31,10 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
 * **No extra port.** DSM's nginx proxies `/synoterm/` to the loopback
   listener, so the terminal is same-origin, TLS-terminated by DSM, and covered
   by DSM's firewall rules.
-* **One static binary.** Zig cross-compiles to `x86_64`/`aarch64`/`armv7` musl
-  binaries from any host. No Node.js, no Python, no runtime dependencies on the
-  NAS.
+* **One static binary.** Zig cross-compiles to `x86_64`/`aarch64`/`armv7`
+  **static musl** binaries; libc is embedded, so the binary does not depend on
+  DSM's glibc (7.1 ships 2.26, while a native build needs 2.36+). No Node.js, no
+  Python, no runtime dependencies on the NAS.
 * **Small surface, explicit lifecycle.** xterm.js renders, the backend owns the
   real PTY, and a session ends when its socket ends (v1 policy). Persistent
   sessions via `libghostty-vt` are designed and deliberately deferred.
@@ -57,7 +58,7 @@ The full roadmap, decisions, risks and open questions are in
 ## Quick start (Linux/macOS, no NAS)
 
 ```sh
-zig build -Doptimize=ReleaseSmall          # or: zig build
+zig build -Doptimize=ReleaseSmall          # static musl, no glibc needed
 (cd frontend && npm install && npm run build)
 
 ./zig-out/bin/synoterm \
@@ -66,6 +67,10 @@ zig build -Doptimize=ReleaseSmall          # or: zig build
 ```
 
 Dev mode trusts the caller and runs the shell as *you*. Never expose it.
+
+`zig build` produces the static musl binary by default; use
+`zig build -Dtarget=native` if you deliberately want a dynamically linked
+build (e.g. to profile with your distro's tools).
 
 Run the tests:
 

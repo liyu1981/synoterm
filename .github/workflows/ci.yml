@@ -18,6 +18,14 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
       - name: zig unit tests
         run: zig build test --summary all
+      - name: default build must be static (no glibc)
+        run: |
+          zig build -Doptimize=ReleaseSmall
+          if LC_ALL=C grep -qa 'GLIBC_2\.' zig-out/bin/synoterm; then
+            echo "::error::default build depends on glibc; expected static musl"
+            exit 1
+          fi
+          echo "static musl binary: $(du -h zig-out/bin/synoterm | cut -f1)"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

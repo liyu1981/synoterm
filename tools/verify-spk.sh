@@ -80,10 +80,15 @@ ELF
 
 if command -v readelf >/dev/null 2>&1; then
   if readelf -l "${WORK}/payload/bin/synoterm" 2>/dev/null | grep -q INTERP; then
-    echo "  WARN binary has a dynamic interpreter (not static musl)"
+    echo "  FAIL binary has a dynamic interpreter (not static musl)"
+    fail=1
   else
     echo "  ok   statically linked"
   fi
+fi
+if LC_ALL=C grep -qa 'GLIBC_2\.' "${WORK}/payload/bin/synoterm" 2>/dev/null; then
+  echo "  FAIL binary references glibc symbols"
+  fail=1
 fi
 
 # The setuid tool must be declared with the same path the payload ships.

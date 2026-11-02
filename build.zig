@@ -1,7 +1,16 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // Default to a fully static musl binary on Linux: synoterm must never
+    // depend on the host's glibc (DSM ships 2.26; a native build needs 2.36+
+    // and dies at exec time with "GLIBC_2.xx not found").
+    // Override with -Dtarget=native if you really want a dynamic binary.
+    const default_target: std.Target.Query = if (builtin.os.tag == .linux)
+        .{ .abi = .musl }
+    else
+        .{};
+    const target = b.standardTargetOptions(.{ .default_target = default_target });
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{

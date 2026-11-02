@@ -575,19 +575,28 @@ else
   why "No SSH tunnel needed. Nothing is installed and DSM's nginx is untouched."
 
   if [ "${DRY_RUN}" -eq 1 ] || confirm "Copy the binary + UI to ${REMOTE_DIR} and run it as ${SSH_USER} on port 7382?"; then
-    want_machine="$(expected_machine "${ARCH}")"
-    have_machine="$(elf_machine "${ROOT}/zig-out/bin/synoterm" || true)"
-    if [ ! -x "${ROOT}/zig-out/bin/synoterm" ] || [ ! -f "${ROOT}/frontend/dist/index.html" ] \
-       || [ "${have_machine}" != "${want_machine}" ]; then
-      note "building backend for ${ZIG_TARGET} (found ELF machine '${have_machine:-none}', want ${want_machine}) and the frontend…"
-      trace "cd ${ROOT} && zig build -Doptimize=ReleaseSmall -Dtarget=${ZIG_TARGET}"
-      (cd "${ROOT}" && zig build -Doptimize=ReleaseSmall -Dtarget="${ZIG_TARGET}" >/dev/null) || die "zig build failed"
+    # Always build a *static musl* binary for the NAS in its own prefix.
+    # Comparing only the ELF machine is not enough: a native `zig build` is
+    # glibc-linked and dies on DSM with "GLIBC_2.xx not found".
+    smoke_prefix="${ROOT}/build/smoke-${ARCH}"
+    smoke_bin="${smoke_prefix}/bin/synoterm"
+    note "building a static ${ZIG_TARGET} binary for the NAS…"
+    trace "zig build -Doptimize=ReleaseSmall -Dtarget=${ZIG_TARGET} -p build/smoke-${ARCH}"
+    ( cd "${ROOT}" && zig build -Doptimize=ReleaseSmall -Dtarget="${ZIG_TARGET}" -p "build/smoke-${ARCH}" ) \
+      || die "zig build failed"
+    if LC_ALL=C grep -qa 'GLIBC_2\.' "${smoke_bin}" 2>/dev/null; then
+      die "${smoke_bin} still references glibc — expected a static musl build"
+    fi
+    ok "static binary: $(du -h "${smoke_bin}" | cut -f1)"
+
+    if [ ! -f "${ROOT}/frontend/dist/index.html" ]; then
+      note "building the frontend…"
       trace "cd ${ROOT}/frontend && npm run build"
       (cd "${ROOT}/frontend" && { [ -d node_modules ] || npm install --no-audit --no-fund >/dev/null; } && npm run build >/dev/null) || die "frontend build failed"
     fi
 
     smoke_ok=1
-    copy_to_nas "${ROOT}/zig-out/bin/synoterm" "${REMOTE_DIR}/synoterm" || smoke_ok=0
+    copy_to_nas "${smoke_bin}" "${REMOTE_DIR}/synoterm" || smoke_ok=0
     copy_tree_to_nas "${ROOT}/frontend/dist" "${REMOTE_DIR}/web" || smoke_ok=0
     on_nas "chmod 755 '${REMOTE_DIR}/synoterm' 2>/dev/null"
     if [ "${smoke_ok}" -eq 0 ]; then
