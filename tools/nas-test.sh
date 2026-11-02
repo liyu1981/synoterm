@@ -562,8 +562,14 @@ if [ -n "${FORCE_UI_STYLE}" ]; then
   UI_STYLE="${FORCE_UI_STYLE}"
   note "ui style forced with --ui-style ${UI_STYLE}"
 fi
-SPK_VERSION="0.1.0-0001"
-[ "${UI_STYLE}" = "vue" ] && SPK_VERSION="0.1.0-0002"
+# Build number must increase for DSM to accept a reinstall as an upgrade;
+# derive it from the source history so every new commit is installable.
+BUILD_NUMBER="$(git -C "${ROOT}" rev-list --count HEAD 2>/dev/null || true)"
+case "${BUILD_NUMBER}" in
+  ''|*[!0-9]*) BUILD_NUMBER="$(date +%y%m%d%H%M)" ;;
+esac
+SPK_VERSION="0.1.0-${BUILD_NUMBER}"
+[ "${UI_STYLE}" = "vue" ] && SPK_VERSION="0.1.1-${BUILD_NUMBER}"
 
 # ------------------------------------------------------------- 4. smoke test --
 if [ "${SKIP_SMOKE}" -eq 1 ]; then
@@ -616,6 +622,11 @@ else
       why "script keeps open: DSM kills background jobs when the login session"
       why "ends, which is why a 'nohup … &' server dies instantly."
 
+      # A server left over from an interrupted run would keep the port and keep
+      # serving the *old* binary (the new file is on disk, but the process holds
+      # the old inode) — which looks exactly like "old build" in the UI.
+      on_nas "pkill -f '${REMOTE_DIR}/synoterm' 2>/dev/null; sleep 0.3" >/dev/null 2>&1 || true
+
       SMOKE_LOG="${ROOT}/build/.smoke-server.log"
       : >"${SMOKE_LOG}"
       trace "ssh ${TARGET} \"exec ./synoterm --listen ${SMOKE_PORT} --bind ${SMOKE_BIND} …\" &"
@@ -642,6 +653,17 @@ else
       printf '\n'
       if [ "${listening}" -eq 1 ]; then
         ok "dev server reachable from this machine on port ${SMOKE_PORT}"
+        # Prove the copy that is running is the build we just made (an old
+        # binary would have no /healthz and the UI would report a 404).
+        smoke_health="$(on_nas "curl -sS --max-time 3 'http://127.0.0.1:${SMOKE_PORT}/healthz'" 2>/dev/null || true)"
+        case "${smoke_health}" in
+          *'"ok":true'*) ok "remote build: $(printf '%s' "${smoke_health}" | tr -d '\n')" ;;
+          "")
+            warn "the running server does not answer /healthz — a stale process may hold port ${SMOKE_PORT}"
+            sed 's/^/    /' "${SMOKE_LOG}" | tail -n 5
+            ;;
+          *) warn "unexpected /healthz answer: $(printf '%s' "${smoke_health}" | head -c 160)" ;;
+        esac
         if [ "${SMOKE_BIND}" = "0.0.0.0" ]; then
           bold "  Open this from any machine on your LAN:"
         else
@@ -692,12 +714,10 @@ why "enables the nginx mount, and starts the service."
   note "your sudo password will be asked over the SSH session."
 
   SPK_FILE="${ROOT}/build/synoterm-${SPK_VERSION}-${ARCH}.spk"
-  if [ ! -f "${SPK_FILE}" ]; then
-    note "building ${SPK_VERSION} for ${ARCH} (os_min_ver=${OS_MIN_VER}, ui=${UI_STYLE})…"
-    trace "SYNOTERM_OS_MIN_VER=${OS_MIN_VER} SYNOTERM_UI_STYLE=${UI_STYLE} tools/build-spk.sh ${ARCH} ${SPK_VERSION}"
-    (cd "${ROOT}" && SYNOTERM_OS_MIN_VER="${OS_MIN_VER}" SYNOTERM_UI_STYLE="${UI_STYLE}" \
-      ./tools/build-spk.sh "${ARCH}" "${SPK_VERSION}" >/dev/null) || die "package build failed"
-  fi
+  note "building ${SPK_VERSION} for ${ARCH} (os_min_ver=${OS_MIN_VER}, ui=${UI_STYLE})…"
+  trace "SYNOTERM_OS_MIN_VER=${OS_MIN_VER} SYNOTERM_UI_STYLE=${UI_STYLE} tools/build-spk.sh ${ARCH} ${SPK_VERSION}"
+  (cd "${ROOT}" && SYNOTERM_OS_MIN_VER="${OS_MIN_VER}" SYNOTERM_UI_STYLE="${UI_STYLE}" \
+    ./tools/build-spk.sh "${ARCH}" "${SPK_VERSION}" >/dev/null) || die "package build failed"
   ok "package: $(basename "${SPK_FILE}") ($(du -h "${SPK_FILE}" | cut -f1))"
   (cd "${ROOT}" && ./tools/verify-spk.sh "${SPK_FILE}" | tail -n 3 | sed 's/^/  /')
 
@@ -723,6 +743,24 @@ why "enables the nginx mount, and starts the service."
       on_nas "echo '  server log:'; tail -n 5 /var/packages/synoterm/var/runtime/synoterm.log 2>&1 | sed 's/^/    /'"
       INSTALLED="yes"
       warn "check that the setuid line starts with -rwsr-x--- root package"
+
+      # Unauthenticated probe through DSM's nginx: proves the installed binary
+      # is the one we just shipped, not an older package still running.
+      health="$(curl -sS -k --max-time 8 "https://${NAS}:${DSM_PORT}/synoterm/healthz" 2>&1 || true)"
+      case "${health}" in
+        *'"ok":true'*)
+          ok "installed server answers /synoterm/healthz: $(printf '%s' "${health}" | tr -d '\n')"
+          ;;
+        404*|*'"code":404'*|"")
+          warn "the installed package does not answer /synoterm/healthz"
+          note "an older build is still installed. Uninstall it and reinstall:"
+          note "  tools/nas-uninstall.sh ${NAS} --user ${SSH_USER}"
+          note "then re-run this script (the build number now increases every run)"
+          ;;
+        *)
+          warn "could not verify the installed build: $(printf '%s' "${health}" | head -c 200)"
+          ;;
+      esac
     else
       warn "package directory /var/packages/synoterm is missing — the install did not complete"
       note "usual cause: Package Center trust level still blocks unsigned packages"
