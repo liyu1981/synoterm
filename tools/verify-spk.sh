@@ -33,7 +33,7 @@ tar -xzf "${WORK}/package.tgz" -C "${WORK}/.." --one-top-level="${WORK}/payload"
   mkdir -p "${WORK}/payload"
   tar -xzf "${WORK}/package.tgz" -C "${WORK}/payload"
 }
-for path in bin/synoterm nginx/synoterm.conf ui/config ui/Synoterm.js ui/images/icon_48.png ui/web/index.html ui/web/app.js; do
+for path in bin/synoterm nginx/synoterm.conf ui/config ui/images/icon_48.png ui/web/index.html ui/web/app.js; do
   if [ -e "${WORK}/payload/${path}" ]; then
     echo "  ok   payload/${path}"
   else
@@ -41,6 +41,20 @@ for path in bin/synoterm nginx/synoterm.conf ui/config ui/Synoterm.js ui/images/
     fail=1
   fi
 done
+
+# Exactly one of the two supported UI registrations must be present.
+if grep -q '"type": "url"' "${WORK}/payload/ui/config"; then
+  echo "  ok   ui/config style: url"
+  if [ -e "${WORK}/payload/ui/Synoterm.js" ]; then
+    echo "  WARN ui/Synoterm.js shipped with the url style (unused)"
+  fi
+elif grep -q '"appWindow"' "${WORK}/payload/ui/config"; then
+  echo "  ok   ui/config style: vue"
+  [ -e "${WORK}/payload/ui/Synoterm.js" ] || { echo "  MISS payload/ui/Synoterm.js"; fail=1; }
+else
+  echo "  MISS valid ui/config registration"
+  fail=1
+fi
 
 # The setuid tool must be declared with the same path the payload ships.
 if ! grep -q '"relpath": "bin/synoterm"' "${WORK}/conf/privilege"; then

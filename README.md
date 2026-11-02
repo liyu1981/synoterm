@@ -34,9 +34,9 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
 * **One static binary.** Zig cross-compiles to `x86_64`/`aarch64`/`armv7` musl
   binaries from any host. No Node.js, no Python, no runtime dependencies on the
   NAS.
-* **PTY state, not screen scraping.** xterm.js renders; the backend keeps the
-  real PTY and (from M3) a server-side VT state via `libghostty-vt`, so tabs
-  survive a browser reload or network drop.
+* **Small surface, explicit lifecycle.** xterm.js renders, the backend owns the
+  real PTY, and a session ends when its socket ends (v1 policy). Persistent
+  sessions via `libghostty-vt` are designed and deliberately deferred.
 
 ## Status
 
@@ -44,10 +44,11 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
 | --- | --- |
 | Zig backend (HTTP, WebSocket, PTY bridge, resize) | working, unit tested |
 | xterm.js frontend (tabs, reconnect, fit, status bar) | working, e2e tested in headless Chromium |
-| DSM package skeleton (`INFO`, `conf/privilege`, `conf/resource`, nginx, `ui/`) | written, not yet installed on a real DSM |
+| DSM package skeleton (`INFO`, `conf/privilege`, `conf/resource`, nginx, `ui/`) | written; both UI registration styles build |
 | DSM session auth (`authenticate.cgi` + group check) | implemented, needs on-device verification |
 | Multi-arch SPK build (`tools/build-spk.sh`) | working (x86_64 verified, armv8/armv7 cross-compiled) |
-| Persistent sessions / reattach (`libghostty-vt`) | designed, not implemented |
+| v1 policy: DSM 7.1 floor, admins only, local accounts only, kill on disconnect | implemented |
+| Persistent sessions / reattach (`libghostty-vt`) | deferred (v1 kills sessions on disconnect); design kept in docs |
 
 The full roadmap, decisions, risks and open questions are in
 **[docs/PLAN.md](docs/PLAN.md)**.
@@ -78,7 +79,16 @@ node tools/e2e.mjs          # needs a Chromium; see the script header
 ./tools/build-spk.sh x86_64 0.1.0-0001     # → build/synoterm-0.1.0-0001-x86_64.spk
 ./tools/build-spk.sh armv8  0.1.0-0001
 ./tools/build-spk.sh armv7  0.1.0-0001
+
+# DSM 7.2 desktop framework (v-app-window) instead of the 7.1-safe .url style:
+SYNOTERM_UI_STYLE=vue ./tools/build-spk.sh x86_64 0.1.0-0001
 ```
+
+Default UI style is `url` (documented for 7.x, works on the 7.1 floor). Under
+that style DSM injects no CSRF token, so the backend authenticates with the DSM
+session cookie; if a 7.1 device turns out to require a token, build the `vue`
+style (7.2) or add the ExtJS wrapper described in
+[docs/dsm-integration.md](docs/dsm-integration.md#53-fallback-if-71-needs-a-token-extjs-wrapper).
 
 Install on the NAS: **Package Center → Manual Install**. DSM 7 refuses
 unsigned packages by default; set *Package Center → Settings → General →

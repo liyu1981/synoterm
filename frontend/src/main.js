@@ -52,14 +52,55 @@ function appBase() {
   return path.replace(/\/$/, "");
 }
 
-/** WebSocket path: injected by the DSM wrapper, derived from the URL in dev. */
+/**
+ * WebSocket path resolution order:
+ *   1. window.SYNOTERM_CONFIG.ws  (written by the packaging step)
+ *   2. ?ws=…                     (injected by the DSM 7.2 Vue wrapper)
+ *   3. derived from the page URL (dev server)
+ */
 function wsPath() {
-  return new URLSearchParams(window.location.search).get("ws") || `${appBase()}/ws`;
+  const configured = window.SYNOTERM_CONFIG && window.SYNOTERM_CONFIG.ws;
+  if (typeof configured === "string" && configured.length > 0) return configured;
+  const injected = new URLSearchParams(window.location.search).get("ws");
+  if (injected) return injected;
+  return `${appBase()}/ws`;
 }
 
-/** DSM hands the CSRF token to third-party app scripts via ?SynoToken=… */
+/**
+ * DSM's CSRF token, if we can find it.
+ *
+ *  - DSM 7.2 app scripts get `?SynoToken=…` appended to their src; the wrapper
+ *    forwards it into this page's URL.
+ *  - With the DSM 7.0/7.1 `.url` registration nothing is injected, so we try
+ *    the same-origin DSM desktop frame and the token cookie.
+ *
+ * An empty value is fine: the backend falls back to cookie-only
+ * authentication, and rejects the session if DSM disagrees.
+ */
 function synoToken() {
-  return new URLSearchParams(window.location.search).get("SynoToken") || "";
+  const fromUrl = new URLSearchParams(window.location.search).get("SynoToken");
+  if (fromUrl) return fromUrl;
+
+  try {
+    const parentWindow = window.parent;
+    if (parentWindow && parentWindow !== window) {
+      const candidates = [
+        parentWindow.SynoToken,
+        parentWindow._SynoToken,
+        parentWindow.SYNO && parentWindow.SYNO.SDS && parentWindow.SYNO.SDS.Session
+          ? parentWindow.SYNO.SDS.Session.getSynoToken?.()
+          : undefined,
+      ];
+      for (const candidate of candidates) {
+        if (typeof candidate === "string" && candidate.length > 0) return candidate;
+      }
+    }
+  } catch {
+    /* cross-origin parent (dev server) — expected */
+  }
+
+  const match = document.cookie.match(/(?:^|;\s*)(?:SynoToken|_SynoToken)=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
 }
 
 function synoTokenSubprotocol(token) {

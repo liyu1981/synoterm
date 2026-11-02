@@ -2,7 +2,7 @@
 // Bundles the xterm.js UI into frontend/dist (no framework, no CDN, works
 // offline — important for a NAS that may never reach the internet).
 import { build, context } from "esbuild";
-import { cpSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -35,6 +35,12 @@ if (watch) {
 }
 
 cpSync(join(here, "src/index.html"), join(outdir, "index.html"));
+// Runtime configuration. The DSM packaging step overwrites this with the
+// nginx mount path (e.g. "/synoterm/ws"); empty means "derive from the URL".
+writeFileSync(
+  join(outdir, "config.js"),
+  'window.SYNOTERM_CONFIG = { ws: "" };\n',
+);
 // style.css is bundled into app.js as text and injected at boot, so DSM's
 // upgrade path cannot leave a stale <link> pointing at an old stylesheet.
 console.log("built", outdir);

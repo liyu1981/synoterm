@@ -1,11 +1,19 @@
 # `libghostty-vt` — evaluation and integration plan
 
-> **Short version.** Use it — but for the *terminal state*, not for the PTY.
-> PTY handling is ~80 lines of syscalls and stays in `src/session.zig`.
-> `libghostty-vt` is what makes detached sessions, correct reflow on reattach,
-> and server-side scrollback search possible without writing a VT emulator.
-> It is planned for **M3**, behind a compile-time switch, with a ring-buffer
-> fallback if the dependency proves unbuildable on a target.
+> **Status: evaluated, deferred (post-1.0).**
+>
+> v1 deliberately kills the shell when the WebSocket closes (decision D12), so
+> there is no server-side session state to maintain and nothing for
+> `libghostty-vt` to do. This document is the design for the future opt-in
+> `--persist` mode (detach/attach, session list, scrollback search); it is kept
+> because it is the only sane way to add persistence later.
+>
+> **Short version for that future work.** Use it for the *terminal state*, not
+> for the PTY. PTY handling is ~80 lines of syscalls and stays in
+> `src/session.zig`. `libghostty-vt` is what makes detached sessions, correct
+> reflow on reattach, and server-side scrollback search possible without
+> writing a VT emulator. Plan it behind a compile-time switch (`-Dvt`), with a
+> ring-buffer fallback if the dependency proves unbuildable on a target.
 
 ## 1. What it is
 
@@ -62,13 +70,13 @@ So the user-facing suggestion "use libghostty for PTY maintaining" splits into:
 | Job | Where it lives in synoterm |
 | --- | --- |
 | open `/dev/ptmx`, `fork`, `setsid`, `TIOCSCTTY`, `TIOCSWINSZ`, `setuid` | `src/session.zig` (already written, no dependency) |
-| track cursor/grid/scrollback/modes, reflow on resize, replay a screen | `libghostty-vt` (planned, M3) |
+| track cursor/grid/scrollback/modes, reflow on resize, replay a screen | `libghostty-vt` (only for `--persist`) |
 | render pixels | xterm.js in the browser (already written) |
 
 Keeping those separate is a feature: the PTY path stays a few dozen syscalls,
 and the VT dependency can be compiled out (`-Dvt=false`) for a minimal build.
 
-## 3. Why we want it (and what it buys)
+## 3. Why we want it (if we add persistence)
 
 Without VT state, the only ways to reattach a session are:
 
@@ -211,8 +219,8 @@ VT and appends to the link's own queue; the link flushes.
 
 | Option | Pros | Cons | Verdict |
 | --- | --- | --- | --- |
-| **`libghostty-vt`** (this) | correct VT, reflow, search, MIT, Zig, small C API | new(ish) library, Zig-version coupling, extra build dep | **chosen for M3** |
-| Raw byte ring buffer | zero deps, trivial | no reflow, unbounded growth for full-screen apps, reparse cost | M2 fallback (also the `-Dvt=false` path) |
+| **`libghostty-vt`** (this) | correct VT, reflow, search, MIT, Zig, small C API | new(ish) library, Zig-version coupling, extra build dep | **chosen for `--persist`** |
+| Raw byte ring buffer | zero deps, trivial | no reflow, unbounded growth for full-screen apps, reparse cost | fallback for `--persist` (also the `-Dvt=false` path) |
 | `tmux` inside the PTY | battle-tested persistence, real detach | extra package on the NAS, second config surface, still needs replay for "screen" | recommended alongside, not instead |
 | xterm.js `SerializeAddon` | client-side state | dies with the browser tab; no server search | not applicable |
 | Write our own VT parser | no deps | months of work, guaranteed bugs | no |
@@ -222,13 +230,13 @@ VT and appends to the link's own queue; the link flushes.
 | Risk | Mitigation |
 | --- | --- |
 | Ghostty requires a newer Zig than our pinned version | pin both; the M0 code is already isolated from `std.Io`, so bumping Zig is cheap; vendored CI toolchain |
-| musl/aarch64/armv7 cross-build fails | spike in M3 week 1 on all three targets before committing to the design; fallback `-Dvt=false` |
+| musl/aarch64/armv7 cross-build fails | spike on all three targets before committing to the design; fallback `-Dvt=false` or the ring buffer |
 | Binary size / memory per session grows | measure; VT state is ~ (cols×rows + scrollback) cells — cap scrollback (`--scrollback-lines`) |
 | C ABI churn between ghostty 1.x releases | pin a tag, use `addTranslateC`, run the ABI schema test in CI, upgrade deliberately |
 | Bugs in the VT layer crash the package | the VT write path is per-session; isolate with a session thread and a panic handler that kills only that session |
 | Build-time network fetch in release builds | vendor the tarball for releases; CI caches it |
 
-## 7. M3 task list (from PLAN.md)
+## 7. Task list when `--persist` is picked up
 
 1. Spike: cross-build `libghostty-vt` for the three targets; record artifact
    names, sizes, build flags.
@@ -237,6 +245,8 @@ VT and appends to the link's own queue; the link flushes.
 3. Session manager: detach/attach, backlog, TTL, session list.
 4. Frontend: snapshot handling, session panel, search.
 5. Soak test: 24 h `htop` session, 100 attach/detach cycles, memory plateau.
+   Revisit the v1 decision (D12) with real usage data before flipping the
+   default.
 6. Documentation + `-Dvt=false` fallback verified.
 
 ## 8. References
