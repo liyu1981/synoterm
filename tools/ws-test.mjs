@@ -1,47 +1,131 @@
 #!/usr/bin/env node
-// Protocol smoke test: talks to a running synoterm with a raw WebSocket client
-// and asserts the shell echo round-trip.
+// Protocol smoke test / end-to-end probe.
 //
-//   ./zig-out/bin/synoterm --listen 8080 --auth dev --web-root frontend/dist &
-//   npm i ws && node tools/ws-test.mjs ws://127.0.0.1:8080/ws
+//   node tools/ws-test.mjs [url] [options]
+//
+//   url                    default ws://127.0.0.1:8080/ws
+//   --cookie '<header>'    Cookie header (DSM session), e.g. 'id=abc123'
+//   --token '<token>'      SynoToken; sent as the WebSocket subprotocol
+//   --origin '<url>'       Origin header override (default: derived from url)
+//   --insecure             accept self-signed TLS (DSM's default certificate)
+//   --expect '<text>'      text that must appear in the output
+//   --timeout <seconds>    default 10
+//   --quiet                only print the verdict
 import WebSocket from "ws";
 
-const url = process.argv[2] || "ws://127.0.0.1:8080/ws";
-const origin = new URL(url).origin;
+const args = process.argv.slice(2);
+let url = "ws://127.0.0.1:8080/ws";
+const options = { cookie: "", token: "", origin: "", insecure: false, expect: "SYNOTERM_WS_OK", timeout: 10, quiet: false };
 
-const socket = new WebSocket(url, { headers: { Origin: origin } });
+for (let i = 0; i < args.length; i += 1) {
+  const arg = args[i];
+  if (!arg.startsWith("--") && url === "ws://127.0.0.1:8080/ws") {
+    url = arg;
+  } else if (arg === "--cookie") options.cookie = args[++i] || "";
+  else if (arg === "--token") options.token = args[++i] || "";
+  else if (arg === "--origin") options.origin = args[++i] || "";
+  else if (arg === "--expect") options.expect = args[++i] || "";
+  else if (arg === "--timeout") options.timeout = Number(args[++i] || 10);
+  else if (arg === "--insecure") options.insecure = true;
+  else if (arg === "--quiet") options.quiet = true;
+  else {
+    console.error(`unknown argument: ${arg}`);
+    process.exit(2);
+  }
+}
+
+const origin = options.origin || new URL(url).origin;
+const headers = { Origin: origin };
+if (options.cookie) headers.Cookie = options.cookie;
+
+const protocols = options.token ? [`synoterm.syno-token.${base64url(options.token)}`] : undefined;
+
+function base64url(value) {
+  return Buffer.from(value, "utf8").toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+const log = (...parts) => {
+  if (!options.quiet) console.log(...parts);
+};
+
+log(`connecting ${url}`);
+log(`  origin: ${origin}${options.cookie ? `, cookie: ${maskCookie(options.cookie)}` : ""}${options.token ? ", token: <redacted>" : ""}`);
+
+const socket = new WebSocket(url, protocols, {
+  headers,
+  ...(options.insecure ? { rejectUnauthorized: false } : {}),
+});
+
 let output = "";
+let control = [];
+let settled = false;
 
-const timeout = setTimeout(() => {
-  console.error("ws-test: timeout waiting for shell echo");
-  console.error(JSON.stringify(output.slice(0, 400)));
-  socket.terminate();
-  process.exit(1);
-}, 8000);
+const timer = setTimeout(() => {
+  finish(1, `timeout after ${options.timeout}s — no "${options.expect}" in the output`);
+}, options.timeout * 1000);
+
+function finish(code, reason) {
+  if (settled) return;
+  settled = true;
+  clearTimeout(timer);
+  if (control.length > 0) log(`  control frames: ${control.join(" ")}`);
+  if (code === 0) {
+    log(`ws-test: ok (${url})`);
+  } else {
+    console.error(`ws-test: FAILED — ${reason}`);
+    if (output) console.error(`  last output: ${JSON.stringify(output.slice(-300))}`);
+  }
+  try {
+    socket.terminate();
+  } catch {
+    /* ignore */
+  }
+  process.exit(code);
+}
+
+function maskCookie(cookie) {
+  return cookie.replace(/(id=)([^;]*)/, (_m, key, value) => `${key}${value.slice(0, 4)}…`);
+}
 
 socket.on("open", () => {
+  log("  handshake: 101 Switching Protocols");
   socket.send(JSON.stringify({ type: "resize", cols: 100, rows: 30 }));
-  socket.send(Buffer.from("echo SYNOTERM_WS_OK\n"));
+  socket.send(Buffer.from(`echo ${options.expect}\n`));
 });
 
 socket.on("message", (data, isBinary) => {
-  output += data.toString();
-  if (!isBinary) {
-    const message = JSON.parse(data.toString());
-    if (message.type === "error") {
-      console.error("ws-test: server error", message);
-      process.exit(1);
-    }
+  if (isBinary) {
+    output += data.toString();
+    if (output.split(options.expect).length > 2) finish(0);
+    return;
   }
-  if (output.split("SYNOTERM_WS_OK").length > 2) {
-    clearTimeout(timeout);
-    console.log("ws-test: ok");
-    socket.close();
-    process.exit(0);
+  const raw = data.toString();
+  output += raw;
+  try {
+    const message = JSON.parse(raw);
+    control.push(message.type + (message.code ? `(${message.code})` : ""));
+    if (message.type === "ready") log(`  server: ready${message.user ? ` as ${message.user}` : ""}`);
+    if (message.type === "error") finish(1, `server error: ${JSON.stringify(message)}`);
+  } catch {
+    /* not JSON — treat as text output */
   }
 });
 
-socket.on("error", (error) => {
-  console.error("ws-test:", error.message);
-  process.exit(1);
+socket.on("unexpected-response", (request, response) => {
+  let body = "";
+  response.on("data", (chunk) => {
+    body += chunk.toString();
+  });
+  response.on("end", () => {
+    const hint = {
+      401: "DSM did not accept the session (cookie missing/expired, or the token is required)",
+      403: "cross-origin request, or the account is not in the administrators group",
+      404: "wrong path — is the nginx mount /synoterm/ present?",
+      429: "session limit reached",
+      500: "authenticate.cgi missing/failed, or the binary lacks the setuid privilege",
+    }[response.statusCode];
+    finish(1, `HTTP ${response.statusCode} ${hint || ""}${body ? ` — ${body.trim().slice(0, 160)}` : ""}`);
+  });
 });
+
+socket.on("error", (error) => finish(1, error.message));

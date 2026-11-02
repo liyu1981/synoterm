@@ -10,13 +10,38 @@
 #   sudo sh /tmp/nas-auth-test.sh 'id=abc123; stay_login=0'
 #   sudo sh /tmp/nas-auth-test.sh 'id=abc123' 'MySynoToken'
 #
+# Reading secrets from stdin instead of argv (used by tools/nas-test.sh):
+#   sh /tmp/nas-auth-test.sh --stdin      # line 1: cookie, line 2: token
+#   sh /tmp/nas-auth-test.sh --file PATH  # same format, file mode 0600
+#
 # How to get the cookie: log in to DSM in the browser -> DevTools ->
 # Application/Storage -> Cookies -> https://<nas>:5001 -> copy `id`
 # (and, if present, `SynoToken`).
 set -u
 
+MODE="argv"
+case "${1:-}" in
+  --stdin) MODE="stdin"; shift ;;
+  --file) MODE="file"; SECRET_FILE="${2:?--file needs a path}"; shift 2 ;;
+esac
+
 COOKIE="${1:-${SYNOTERM_COOKIE:-}}"
 TOKEN="${2:-${SYNOTERM_SYNOTOKEN:-}}"
+
+case "${MODE}" in
+  stdin)
+    IFS= read -r COOKIE || true
+    IFS= read -r TOKEN || true
+    ;;
+  file)
+    if [ ! -r "${SECRET_FILE}" ]; then
+      echo "cannot read ${SECRET_FILE}" >&2
+      exit 2
+    fi
+    COOKIE=$(sed -n '1p' "${SECRET_FILE}")
+    TOKEN=$(sed -n '2p' "${SECRET_FILE}")
+    ;;
+esac
 CGI=/usr/syno/synoman/webman/modules/authenticate.cgi
 HOST="${SYNOTERM_HOST:-$(hostname)}"
 
@@ -60,7 +85,11 @@ echo "probing ${CGI}"
 echo "  host header: ${HOST}:5001"
 echo
 run "cookie only" ""
-run "cookie + token" "${TOKEN}"
+if [ -n "${TOKEN}" ]; then
+  run "cookie + token" "${TOKEN}"
+else
+  printf '  %-22s -> (no token supplied; skipping)\n' "cookie + token"
+fi
 echo
 cat <<'EOF'
 interpretation

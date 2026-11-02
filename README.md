@@ -108,23 +108,30 @@ src/                     Zig backend
   util.zig               allocator/list/mutex shims for Zig 0.17
 frontend/                xterm.js UI (esbuild bundle, no framework)
 packaging/dsm7/          DSM 7 package skeleton (INFO, conf, nginx, ui, scripts)
-tools/                   build-spk.sh, make-icons.py, e2e.mjs, dev.sh
+tools/                   build-spk.sh, verify-spk.sh, make-icons.py, dev.sh,
+                         e2e.mjs, ws-test.mjs, nas-test.sh (interactive NAS run),
+                         nas-preflight.sh, nas-auth-test.sh, nas-uninstall.sh
 docs/                    plan, architecture, DSM integration, protocol, libghostty-vt
 ```
 
 ## Testing on a real NAS
 
-Four stages, risk-ordered, with read-only preflight scripts:
+One interactive script drives the whole thing over SSH and stops before every
+step that changes DSM:
 
 ```sh
-scp tools/nas-preflight.sh tools/nas-auth-test.sh admin@nas:/tmp/
-ssh admin@nas 'sudo sh /tmp/nas-preflight.sh'          # stage 0: read-only
-ssh admin@nas "sudo sh /tmp/nas-auth-test.sh 'id=…'"   # stage 1: cookie vs token
-# stage 2: run the binary from /tmp over an SSH tunnel (no install)
-# stage 3: Package Center → Manual Install (the only step that changes DSM)
+tools/nas-test.sh nas.local              # ssh user "admin"; asks for the DSM password
+tools/nas-test.sh nas.local --dry-run    # show the plan, change nothing
+tools/nas-test.sh nas.local --skip-install --yes    # read-only + smoke test only
 ```
 
-Full sequence, expectations and rollback:
+It detects the DSM build/architecture, runs the preflight, logs in to DSM to
+probe `authenticate.cgi` (cookie vs token), runs the binary from `/tmp` behind
+an SSH tunnel so you can use the terminal in your browser, then installs the
+right `.spk` for the detected arch and verifies it end to end through nginx,
+TLS, DSM auth and the PTY. `tools/nas-uninstall.sh nas.local` rolls back.
+
+Manual stages, expectations and rollback details:
 [docs/dsm-integration.md §10](docs/dsm-integration.md#10-testing-on-a-real-production-nas).
 
 ## Documentation
