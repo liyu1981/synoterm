@@ -363,7 +363,115 @@ DSM 7 verifies package signatures by default. For an unsigned build:
 [ ] no terminal traffic in /var/log/nginx/access.log
 ```
 
-## 10. Gotchas worth remembering
+## 10. Testing on a real (production) NAS
+
+Yes — a real DSM 7.1 box is the best test target, but do it in four stages so the
+risky step is last and reversible. Nothing in stages 0–2 writes to DSM's config.
+
+### Stage 0 — read-only preflight
+
+```sh
+scp tools/nas-preflight.sh admin@nas:/tmp/
+ssh admin@nas 'sudo sh /tmp/nas-preflight.sh'
+```
+
+Checks DSM build vs `os_min_ver`, architecture, `authenticate.cgi` usability,
+port 7381, `synopkg`, and whether an old install exists. If the build is older
+than 42661, rebuild with `SYNOTERM_OS_MIN_VER=<major>.<minor>-<build>`.
+
+### Stage 1 — answer the cookie/token question (no changes)
+
+Log in to the DSM desktop, copy the `id` cookie from DevTools
+(Application → Cookies → `https://<nas>:5001`), then:
+
+```sh
+scp tools/nas-auth-test.sh admin@nas:/tmp/
+ssh admin@nas "sudo sh /tmp/nas-auth-test.sh 'id=<value>; stay_login=0' '<SynoToken-if-present>'"
+```
+
+Outcome decides the UI style:
+
+| Result | Action |
+| --- | --- |
+| `cookie only` prints the account | ship the default `.url` build |
+| only `cookie + token` prints it | build `SYNOTERM_UI_STYLE=vue` (7.2) or add the ExtJS wrapper (§5.3) |
+| both empty | re-copy the cookie with the desktop tab open; the session may have expired |
+
+### Stage 2 — binary, PTY and browser, no package (reversible)
+
+This validates the static musl binary, PTY spawning, `setuid`-based user
+switching, and the frontend — without touching DSM's nginx or Package Center.
+
+```sh
+# on the laptop: build for the NAS architecture (uname -m there)
+./tools/build-spk.sh "$(uname -m)" 0.0.0-probe >/dev/null   # just to get frontend/dist
+# actually only the binary + bundle are needed:
+scp zig-out/bin/synoterm admin@nas:/tmp/synoterm
+scp -r frontend/dist admin@nas:/tmp/synoterm-web
+
+# on the NAS: run loopback-only, as root, in dev mode (trusts the caller)
+ssh admin@nas 'sudo /tmp/synoterm --listen 7382 --auth dev --web-root /tmp/synoterm-web'
+
+# on the laptop: forward the loopback port and open http://127.0.0.1:7382/
+ssh -N -L 7382:127.0.0.1:7382 admin@nas
+```
+
+Expected: tabs, a root shell, resize works, `Ctrl+Shift+T` opens a second tab.
+Ctrl-C the server when done; `/tmp` cleanup is `rm -f /tmp/synoterm*`.
+
+If the terminal does not appear, check the binary's dynamic/static nature
+(`ldd /tmp/synoterm` → "not a dynamic executable") and run it in the foreground
+to see the log line.
+
+### Stage 3 — the package (the only step that changes DSM)
+
+Preconditions: you are an administrator, nobody else relies on the DSM web UI
+for the next five minutes (the install reloads nginx), and you accept a **setuid
+root helper** on the NAS for the duration of the test.
+
+1. Package Center → Settings → General → Trust Level → allow any publisher.
+2. Package Center → Manual Install → `synoterm-<ver>-<arch>.spk`.
+3. Run the checklist in §9 above.
+
+### Stage 4 — rollback
+
+1. Package Center → synoterm → **Uninstall** (DSM removes the nginx snippet and
+   the package directories; it also reloads nginx).
+2. Verify:
+
+```sh
+grep -r synoterm /etc/nginx/ 2>/dev/null            # expect nothing
+ls -d /var/packages/synoterm 2>/dev/null            # expect nothing
+netstat -ltn | grep 7381                            # expect nothing
+```
+
+3. Revert the Package Center trust level to the stricter setting.
+
+What to capture if something fails:
+
+```sh
+tail -n 200 /var/packages/synoterm/var/runtime/synoterm.log
+tail -n 200 /var/log/nginx/error.log
+ls -l /var/packages/synoterm/target/bin/synoterm     # expect -rwsr-x--- root package
+/usr/syno/bin/synopkg status synoterm
+grep -n synoterm /etc/nginx/conf.d/*.conf /etc/nginx/nginx.conf 2>/dev/null
+```
+
+Plus the browser's Network tab entry for `GET /synoterm/ws` (status code) and
+the exact response body of a rejected upgrade.
+
+### Notes for a live system
+
+* 2FA/LDAP users: 2FA is fine (we reuse the existing session, no password is
+  typed); domain accounts are refused by design in v1.
+* Custom DSM ports (`:5000`/`:5001` changed) need no change: the origin check
+  compares `Origin`'s host:port against the `Host` header, and nginx forwards
+  `$http_host`.
+* If DSM sits behind a reverse proxy with its own hostname, `$http_host` is that
+  hostname and the check still matches.
+* Uninstalling kills any open shells; warn other administrators first.
+
+## 11. Gotchas worth remembering
 
 * `tar` for the `.spk` is **uncompressed**; `package.tgz` inside is gzipped.
 * Scripts must be executable *inside* the tarball (`chmod 755` before tarring).

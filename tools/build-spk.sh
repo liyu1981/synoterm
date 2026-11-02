@@ -7,6 +7,8 @@
 # version: SPK version, "x.y.z-rev" (default: 0.1.0-0001)
 #
 # Env:
+#   SYNOTERM_OS_MIN_VER  override os_min_ver (default: 7.1-42661)
+#     e.g. SYNOTERM_OS_MIN_VER=7.1-42218 for a NAS on an older 7.1 build
 #   SYNOTERM_UI_STYLE  url | vue   (default: url)
 #     url — documented `.url` registration; works on DSM 7.0/7.1/7.2 and opens
 #           the app URL in a DSM-managed window. No SynoToken injection.
@@ -33,6 +35,7 @@ case "${ARCH}" in
     ;;
 esac
 
+OS_MIN_VER="${SYNOTERM_OS_MIN_VER:-7.1-42661}"
 UI_STYLE="${SYNOTERM_UI_STYLE:-url}"
 case "${UI_STYLE}" in
   url|vue) ;;
@@ -95,6 +98,7 @@ echo "==> INFO"
 sed \
   -e "s|@SPK_VERSION@|${SPK_VERSION}|g" \
   -e "s|@ARCH@|${ARCH}|g" \
+  -e "s|@OS_MIN_VER@|${OS_MIN_VER}|g" \
   -e "s|@EXTRACT_SIZE@|${EXTRACT_SIZE}|g" \
   -e "s|@MAINTAINER@|${MAINTAINER}|g" \
   -e "s|@MAINTAINER_URL@|${MAINTAINER_URL}|g" \
@@ -110,5 +114,5 @@ echo "==> ${OUT}"
 ( cd "${STAGING}" && tar -cf "${OUT}" --format=ustar --owner=0 --group=0 \
     INFO package.tgz scripts conf LICENSE PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG )
 
-echo "ui style: ${UI_STYLE}"
+echo "ui style: ${UI_STYLE}, os_min_ver: ${OS_MIN_VER}"
 ls -lh "${OUT}"

@@ -25,6 +25,9 @@ for path in INFO package.tgz scripts/start-stop-status conf/privilege conf/resou
   check "${path}"
 done
 
+grep -q '@OS_MIN_VER@' "${WORK}/INFO" && { echo "  FAIL unresolved @OS_MIN_VER@ in INFO"; fail=1; }
+grep -q '@' "${WORK}/INFO" && { echo "  FAIL unresolved @placeholder@ in INFO"; fail=1; }
+
 for field in package version os_min_ver arch thirdparty dsmuidir dsmappname startable ctl_stop; do
   grep -q "^${field}=" "${WORK}/INFO" || { echo "  MISS INFO field ${field}"; fail=1; }
 done

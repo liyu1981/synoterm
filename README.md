@@ -112,6 +112,21 @@ tools/                   build-spk.sh, make-icons.py, e2e.mjs, dev.sh
 docs/                    plan, architecture, DSM integration, protocol, libghostty-vt
 ```
 
+## Testing on a real NAS
+
+Four stages, risk-ordered, with read-only preflight scripts:
+
+```sh
+scp tools/nas-preflight.sh tools/nas-auth-test.sh admin@nas:/tmp/
+ssh admin@nas 'sudo sh /tmp/nas-preflight.sh'          # stage 0: read-only
+ssh admin@nas "sudo sh /tmp/nas-auth-test.sh 'id=…'"   # stage 1: cookie vs token
+# stage 2: run the binary from /tmp over an SSH tunnel (no install)
+# stage 3: Package Center → Manual Install (the only step that changes DSM)
+```
+
+Full sequence, expectations and rollback:
+[docs/dsm-integration.md §10](docs/dsm-integration.md#10-testing-on-a-real-production-nas).
+
 ## Documentation
 
 * [docs/PLAN.md](docs/PLAN.md) — milestones, decisions, risks, open questions
