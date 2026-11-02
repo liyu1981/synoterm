@@ -516,6 +516,24 @@ the exact response body of a rejected upgrade.
   your SSH user without DSM authentication — the random `?t=` secret is the only
   guard, and the server is stopped at the end of the step. Use `--loopback` to
   bind 127.0.0.1 instead.
+* **DSM kills background processes when the login session ends.** A
+  `nohup … &` server started from an `ssh` command dies the moment that command
+  returns (`systemd` `KillUserProcesses`, or the session's cgroup being torn
+  down) — the listener disappears and `curl` then reports *connection refused*.
+  That is why `nas-test.sh` starts the dev server in the **foreground of a
+  dedicated SSH connection it keeps open** for the whole step. Manual
+  equivalent, with the SSH window left open while you test:
+
+  ```sh
+  ssh <user>@<nas> '~/\.synoterm-test/synoterm --listen 7382 --bind 0.0.0.0 \
+      --auth dev --dev-token s3cret --web-root ~/.synoterm-test/web'
+  ```
+
+  If you need it detached, use DSM's Task Scheduler ("Run command" as your
+  user) rather than `nohup` over ssh.
+* `connection refused` vs `timeout` when testing from the LAN tells you which
+  problem you have: *refused* = nothing listening (the process died), *timeout*
+  = DSM's firewall (Control Panel → Security → Firewall) is dropping the port.
 * Standalone equivalent: `synoterm --listen 7382 --bind 0.0.0.0 --auth dev
   --dev-token <secret> --web-root <dir>`.
 

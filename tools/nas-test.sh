@@ -603,43 +603,68 @@ else
       DEV_TOKEN="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
       [ -n "${DEV_TOKEN}" ] || DEV_TOKEN="dev$(date +%s)$$"
       why "Dev server: no DSM auth, so a random shared secret is required."
-      why "The browser URL carries it as ?t=…; the backend rejects anything else."
-      launch_out="$(on_nas "HOME='${REMOTE_DIR}' nohup '${REMOTE_DIR}/synoterm' --listen ${SMOKE_PORT} --bind ${SMOKE_BIND} --auth dev --dev-token '${DEV_TOKEN}' --web-root '${REMOTE_DIR}/web' >'${REMOTE_DIR}/server.log' 2>&1 & echo SYNOTERM_PID=\$!; sleep 1; tail -n 3 '${REMOTE_DIR}/server.log'")"
-      printf '%s\n' "${launch_out}"
-      SMOKE_PID="$(printf '%s' "${launch_out}" | sed -n 's/^SYNOTERM_PID=\([0-9]*\)$/\1/p')"
-      if [ -n "${SMOKE_PID}" ]; then
-        ok "server pid ${SMOKE_PID} on ${SMOKE_BIND}:${SMOKE_PORT}"
-      else
-        warn "could not read the server pid from the launch output"
-      fi
+      why "It runs in the foreground of a dedicated SSH connection that this"
+      why "script keeps open: DSM kills background jobs when the login session"
+      why "ends, which is why a 'nohup … &' server dies instantly."
+
+      SMOKE_LOG="${ROOT}/build/.smoke-server.log"
+      : >"${SMOKE_LOG}"
+      trace "ssh ${TARGET} \"exec ./synoterm --listen ${SMOKE_PORT} --bind ${SMOKE_BIND} …\" &"
+      ssh "${SSH_OPTS[@]}" "${TARGET}" \
+        "cd '${REMOTE_DIR}' && HOME='${REMOTE_DIR}' exec ./synoterm \
+           --listen ${SMOKE_PORT} --bind ${SMOKE_BIND} --auth dev \
+           --dev-token '${DEV_TOKEN}' --web-root '${REMOTE_DIR}/web'" \
+        </dev/null >"${SMOKE_LOG}" 2>&1 &
+      SERVER_SSH_PID=$!
 
       SMOKE_URL="http://${NAS}:${SMOKE_PORT}/?t=${DEV_TOKEN}"
       SMOKE_WS="ws://${NAS}:${SMOKE_PORT}/ws"
-      printf '\n'
-      if [ "${SMOKE_BIND}" = "0.0.0.0" ]; then
-        bold "  Open this from any machine on your LAN:"
-      else
-        bold "  Open this (loopback only — tunnel it yourself):"
-      fi
-      bold "      ${SMOKE_URL}"
-      printf '\n'
-      warn "this dev server runs a shell as ${SSH_USER} and has no DSM login;"
-      note "it is reachable from your network until this step stops it, and the"
-      note "secret above is the only thing in front of it."
 
-      printf '\n  Automated probe from this machine:\n'
-      trace "node tools/ws-test.mjs ${SMOKE_WS} --dev-token <secret> --expect SYNOTERM_WS_OK"
-      (cd "${ROOT}" && node tools/ws-test.mjs "${SMOKE_WS}" --dev-token "${DEV_TOKEN}" \
-        --expect SYNOTERM_WS_OK --timeout 15) \
-        || warn "probe failed — see ${REMOTE_DIR}/server.log on the NAS"
+      # Wait for the listener, from this machine (that also proves the LAN path).
+      listening=0
+      attempt=0
+      while [ "${attempt}" -lt 40 ]; do
+        if (exec 3<>"/dev/tcp/${NAS}/${SMOKE_PORT}") 2>/dev/null; then listening=1; break; fi
+        kill -0 "${SERVER_SSH_PID}" 2>/dev/null || break
+        attempt=$((attempt + 1))
+        sleep 0.25
+      done
+
+      printf '\n'
+      if [ "${listening}" -eq 1 ]; then
+        ok "dev server reachable from this machine on port ${SMOKE_PORT}"
+        if [ "${SMOKE_BIND}" = "0.0.0.0" ]; then
+          bold "  Open this from any machine on your LAN:"
+        else
+          bold "  Open this (loopback only — tunnel it yourself):"
+        fi
+        bold "      ${SMOKE_URL}"
+        printf '\n'
+        warn "this dev server runs a shell as ${SSH_USER} and has no DSM login;"
+        note "it is reachable from your network until this step stops it, and the"
+        note "secret above is the only thing in front of it."
+        printf '\n  Automated probe from this machine:\n'
+        trace "node tools/ws-test.mjs ${SMOKE_WS} --dev-token <secret>"
+        (cd "${ROOT}" && node tools/ws-test.mjs "${SMOKE_WS}" --dev-token "${DEV_TOKEN}" \
+          --expect SYNOTERM_WS_OK --timeout 15) \
+          || warn "probe failed — see the log below"
+      else
+        fail "the dev server did not start or is not reachable on port ${SMOKE_PORT}"
+        printf '\n  server output:\n'
+        sed 's/^/    /' "${SMOKE_LOG}" | tail -n 15
+        printf '\n  diagnostics on the NAS:\n'
+        on_nas "echo '  listeners:'; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -w ${SMOKE_PORT} | sed 's/^/    /' || echo '    (nothing on ${SMOKE_PORT})'; echo '  local curl:'; (curl -sS -o /dev/null -w '    HTTP %{http_code}\\n' --max-time 3 'http://127.0.0.1:${SMOKE_PORT}/' 2>&1 || true) | sed 's/^/    /'" 2>&1 | sed 's/^/  /'
+        note "if the listener exists but the LAN cannot reach it, DSM's firewall"
+        note "(Control Panel → Security → Firewall) is blocking port ${SMOKE_PORT}."
+      fi
 
       printf '\n  Press Enter when you are done with the browser terminal… '
       read -r _ || true
-
-      if [ -n "${SMOKE_PID:-}" ]; then
-        on_nas "kill ${SMOKE_PID} 2>/dev/null; sleep 1; kill -9 ${SMOKE_PID} 2>/dev/null; echo '  dev server stopped'"
-      else
-        on_nas "pkill -f '${REMOTE_DIR}/synoterm' 2>/dev/null; echo '  server stopped'"
+      kill "${SERVER_SSH_PID}" 2>/dev/null || true
+      wait "${SERVER_SSH_PID}" 2>/dev/null || true
+      on_nas "pkill -f '${REMOTE_DIR}/synoterm' 2>/dev/null; echo '  dev server stopped'"
+      if [ -f "${SMOKE_LOG}" ]; then
+        cp "${SMOKE_LOG}" "${ROOT}/build/smoke-server.log" 2>/dev/null || true
       fi
     fi
   fi
