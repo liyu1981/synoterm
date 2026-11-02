@@ -84,7 +84,8 @@ function finish(code, reason) {
 }
 
 function maskCookie(cookie) {
-  return cookie.replace(/(id=)([^;]*)/, (_m, key, value) => `${key}${value.slice(0, 4)}…`);
+  // Never print session material: the transcript may be shared.
+  return cookie.replace(/(id=)([^;]*)/, (_m, key) => `${key}********`);
 }
 
 socket.on("open", () => {

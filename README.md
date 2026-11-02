@@ -123,7 +123,12 @@ step that changes DSM:
 tools/nas-test.sh nas.local              # ssh user "admin"; asks for the DSM password
 tools/nas-test.sh nas.local --dry-run    # show the plan, change nothing
 tools/nas-test.sh nas.local --skip-install --yes    # read-only + smoke test only
+tools/nas-test.sh nas.local --trace --log nas.log   # bash/remote tracing + transcript
 ```
+
+Every command it runs is printed as `+ …` (secrets redacted); `--quiet` hides
+them, `--trace` also enables `set -x` and runs the remote probes with `sh -x`,
+and `--log` writes a shareable transcript with ANSI codes stripped.
 
 It detects the DSM build/architecture, runs the preflight, logs in to DSM to
 probe `authenticate.cgi` (cookie vs token), runs the binary from `/tmp` behind

@@ -372,8 +372,11 @@ automated, interactively, by:
 tools/nas-test.sh nas.local
 ```
 
-It prints every remote command, stops before the smoke test and before the
-install, and never uninstalls unless you pass `--uninstall`. The manual stages
+It prints every remote command as `+ …` (passwords, cookies and tokens are
+redacted), explains in one or two lines what each step is for, stops before the
+smoke test and before the install, and never uninstalls unless you pass
+`--uninstall`. `--trace` adds `set -x`/remote `sh -x` output, `--log <file>`
+writes a shareable transcript, `--quiet` silences the command trace. The manual stages
 are kept here as the reference for what it does and for troubleshooting.
 
 Do it in four stages so the risky step is last and reversible. Nothing in
