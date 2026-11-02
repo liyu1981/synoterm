@@ -106,6 +106,10 @@ Two hard-won rules, each guarding against a bug seen on a real NAS:
 * Bundled by esbuild into `frontend/dist/app.js` (~350 KB, no framework, no CDN
   — the NAS may be offline).
 * `Terminal` per tab, `FitAddon` for sizing, `WebLinksAddon` for clickable URLs.
+* The 16-colour palette is tuned for a dark surface and `minimumContrastRatio:
+  4.5` is set, so colours a program chooses (including the 256-colour cube and
+  `ls --color`'s `ow=34;42` "blue on green") are raised to a readable contrast
+  instead of vanishing into the background.
 * Keystrokes go out as **binary** frames (xterm.js `onData` → `TextEncoder`);
   control messages (`resize`, `close`) are **text** frames with JSON.
 * Reconnect with exponential backoff (0.5 s → 8 s), and only when the socket

@@ -29,27 +29,30 @@ import {
  */
 
 const THEME = {
-  background: "#10161d",
-  foreground: "#c8d3e0",
-  cursor: "#61dafb",
-  cursorAccent: "#10161d",
-  selectionBackground: "rgba(97, 218, 251, 0.28)",
-  black: "#1a2430",
-  red: "#ff6b6b",
-  green: "#57d38c",
-  yellow: "#f0c674",
-  blue: "#61dafb",
-  magenta: "#c792ea",
-  cyan: "#7fdbca",
-  white: "#c8d3e0",
-  brightBlack: "#7d8a99",
-  brightRed: "#ff8a8a",
-  brightGreen: "#7ee2a8",
-  brightYellow: "#ffd98a",
-  brightBlue: "#8be9fd",
-  brightMagenta: "#dba6ff",
-  brightCyan: "#a2f5e8",
-  brightWhite: "#ffffff",
+  // Tuned for a dark terminal: every colour keeps at least ~5:1 contrast on the
+  // background, because many tools (ls --color, git, vim themes) print "bold
+  // blue" or 256-colour codes that are unreadable on a near-black surface.
+  background: "#0f1720",
+  foreground: "#d7e0ea",
+  cursor: "#7ee0ff",
+  cursorAccent: "#0f1720",
+  selectionBackground: "rgba(126, 224, 255, 0.28)",
+  black: "#22303f",
+  red: "#ff7a85",
+  green: "#8ce99a",
+  yellow: "#ffd479",
+  blue: "#82b7ff",
+  magenta: "#d8a8ff",
+  cyan: "#79e0d3",
+  white: "#cbd6e2",
+  brightBlack: "#7b8b9e",
+  brightRed: "#ffa2aa",
+  brightGreen: "#b2f2bb",
+  brightYellow: "#ffe3a3",
+  brightBlue: "#aecfff",
+  brightMagenta: "#e9c9ff",
+  brightCyan: "#a9f2e6",
+  brightWhite: "#f4f8fc",
 };
 
 /** Current font settings; changed from the settings panel or ?font…= params. */
@@ -61,6 +64,10 @@ function termOptions() {
     fontSize: fontSettings.fontSize,
     lineHeight: fontSettings.lineHeight,
     cursorBlink: true,
+    // Lets xterm.js raise the contrast of any colour a program emits (including
+    // the 256-colour cube) instead of drawing low-contrast text.
+    minimumContrastRatio: 4.5,
+    allowTransparency: false,
     scrollback: 10000,
     allowProposedApi: true,
     theme: THEME,
@@ -213,25 +220,73 @@ function rememberToken(value, source) {
   return tokenCache.value;
 }
 
+/** Where we looked, so a support report can explain a failure. */
+let tokenSources = [];
+
+function noteSource(name, value) {
+  tokenSources.push({ source: name, found: !!value, length: value ? value.length : 0 });
+  return value || "";
+}
+
 function tokenFromText(text) {
-  const match = text.match(/SynoToken["']?\s*[:=]\s*["']([^"'&<>]+)["']/);
-  return match ? match[1] : "";
+  // DSM has used several spellings, quoted and unquoted, and in URLs the token
+  // can arrive percent-encoded.
+  const patterns = [
+    /SynoToken["']?\s*[:=]\s*["']([^"'&<>\\]+)["']/,
+    /SynoToken["']?\s*[:=]\s*([^"'&<>;,\s\\]+)/,
+    /[?&](?:SynoToken|synotoken)=([^&"'<>\\]+)/,
+    /SynoToken%3D([^&"'<>\\]+)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return decodeURIComponent(match[1]);
+  }
+  return "";
+}
+
+function tokenFromCookies(cookieText) {
+  for (const part of (cookieText || "").split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    if (/synotoken/i.test(name)) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return "";
 }
 
 function tokenFromWindow(win) {
   if (!win || win === window) return "";
   try {
-    const candidates = [win.SynoToken, win._SynoToken];
+    // After login DSM redirects the desktop to …/index.cgi?SynoToken=…, so the
+    // parent frame's own URL is often the easiest source.
+    const fromUrl = tokenFromText(`${win.location.search || ""}${win.location.hash || ""}`);
+    if (fromUrl) return fromUrl;
+
+    // Globals DSM keeps in the desktop page (names have varied across releases).
+    const globals = [win.SynoToken, win._SynoToken, win.synotoken, win.__SynoToken, win.SYNO_TOKEN];
     if (win.SYNO && win.SYNO.SDS && win.SYNO.SDS.Session) {
       const session = win.SYNO.SDS.Session;
-      candidates.push(typeof session.getSynoToken === "function" ? session.getSynoToken() : undefined);
+      globals.push(
+        typeof session.getSynoToken === "function" ? session.getSynoToken() : undefined,
+        session.synoToken,
+        session._synoToken,
+        session.SynoToken,
+      );
     }
-    for (const candidate of candidates) {
+    try {
+      if (win.Ext && win.Ext.util && win.Ext.util.Cookies) {
+        globals.push(win.Ext.util.Cookies.get("SynoToken"), win.Ext.util.Cookies.get("_SynoToken"));
+      }
+    } catch {
+      /* Ext not reachable */
+    }
+    for (const candidate of globals) {
       if (typeof candidate === "string" && candidate.length > 0) return candidate;
     }
-    const cookie = win.document.cookie || "";
-    const match = cookie.match(/(?:^|;\s*)(?:SynoToken|_SynoToken)=([^;]+)/);
-    if (match) return decodeURIComponent(match[1]);
+
+    const fromCookie = tokenFromCookies(win.document.cookie);
+    if (fromCookie) return fromCookie;
+
     const html = win.document.documentElement ? win.document.documentElement.outerHTML : "";
     return tokenFromText(html.slice(0, 4 * 1024 * 1024));
   } catch {
@@ -241,36 +296,58 @@ function tokenFromWindow(win) {
 
 async function discoverSynoToken() {
   if (tokenCache.value) return tokenCache.value;
+  tokenSources = [];
+  window.synotermTokenSources = tokenSources;
 
-  const fromUrl = new URLSearchParams(window.location.search).get("SynoToken");
-  if (fromUrl) return rememberToken(fromUrl, "page URL");
+  const fromOwnUrl = noteSource("page URL", tokenFromText(`${window.location.search}${window.location.hash}`));
+  if (fromOwnUrl) return rememberToken(fromOwnUrl, "page URL");
 
   for (const [name, win] of [
     ["parent frame", window.parent],
     ["opener window", window.opener],
     ["top window", window.top],
   ]) {
-    const value = tokenFromWindow(win);
+    const value = noteSource(name, tokenFromWindow(win));
     if (value) return rememberToken(value, name);
   }
 
-  // Only ask DSM's desktop page when we are actually inside DSM: on a dev
-  // server this path does not exist and the 404 would show up in the console.
+  // Only ask DSM's desktop page when we are inside DSM: on a dev server the
+  // path does not exist and the 404 would show in the console.
   const insideDsm = window.parent !== window || window.location.pathname.startsWith("/webman/");
   if (insideDsm) {
+    for (const path of ["/webman/index.cgi", "/webman/desktop/index.html"]) {
+      try {
+        const response = await fetch(path, { credentials: "same-origin" });
+        if (!response.ok) {
+          noteSource(path, "");
+          continue;
+        }
+        const value = noteSource(path, tokenFromText(await response.text()));
+        if (value) return rememberToken(value, path);
+      } catch {
+        noteSource(path, "");
+      }
+    }
+
+    // Last resort: the CGI probe shipped in this package. It runs inside webman
+    // with the real request environment, so it can report what DSM itself sees.
     try {
-      const response = await fetch("/webman/index.cgi", { credentials: "same-origin" });
+      const response = await fetch("auth-probe.cgi", { credentials: "same-origin" });
       if (response.ok) {
-        const value = tokenFromText(await response.text());
-        if (value) return rememberToken(value, "/webman/index.cgi");
+        const info = await response.json();
+        window.synotermAuthProbe = info;
+        const value = noteSource("auth-probe.cgi", typeof info.token === "string" ? info.token : "");
+        if (value) return rememberToken(value, "auth-probe.cgi");
+      } else {
+        noteSource("auth-probe.cgi", "");
       }
     } catch {
-      /* not served from the DSM origin */
+      noteSource("auth-probe.cgi", "");
     }
   }
 
-  const match = document.cookie.match(/(?:^|;\s*)(?:SynoToken|_SynoToken)=([^;]+)/);
-  if (match) return rememberToken(decodeURIComponent(match[1]), "cookie");
+  const fromCookie = noteSource("cookie", tokenFromCookies(document.cookie));
+  if (fromCookie) return rememberToken(fromCookie, "cookie");
 
   return "";
 }

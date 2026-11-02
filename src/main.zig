@@ -462,7 +462,11 @@ fn checkAccess(
             const capture = auth.runCapture(allocator, auth.authenticate_cgi, &no_env, env) catch
                 return deny(500, "DSM session lookup failed");
             if (capture.status == 127) return deny(500, "authenticate.cgi is missing on this DSM build");
-            if (capture.status != 0) return deny(500, "DSM session lookup failed");
+            if (capture.status != 0) {
+                // DSM 7.1 needs cookie *and* SynoToken; a cookie alone makes
+                // authenticate.cgi exit non-zero with no output.
+                return deny(401, "DSM rejected the session - the SynoToken was not presented (DSM 7.1 needs both)");
+            }
             const user = std.mem.trim(u8, capture.output, " \t\r\n");
             if (user.len == 0) return deny(401, "no DSM session — open the terminal from the DSM desktop, or reload the page");
             if (!validAccountName(user)) return deny(403, "invalid account name");

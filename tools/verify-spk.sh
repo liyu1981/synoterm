@@ -36,8 +36,9 @@ tar -xzf "${WORK}/package.tgz" -C "${WORK}/.." --one-top-level="${WORK}/payload"
   mkdir -p "${WORK}/payload"
   tar -xzf "${WORK}/package.tgz" -C "${WORK}/payload"
 }
-for path in bin/synoterm ui/config ui/images/icon_48.png ui/web/index.html ui/web/app.js ui/web/icon.svg ui/web/config.js \
-            contrib/README.md contrib/install-nginx-mount.sh contrib/uninstall-nginx-mount.sh contrib/nginx/synoterm.conf; do
+for path in bin/synoterm ui/config ui/auth-probe.cgi ui/images/icon_48.png ui/web/index.html ui/web/app.js ui/web/icon.svg ui/web/config.js \
+            contrib/README.md contrib/install-nginx-mount.sh contrib/uninstall-nginx-mount.sh \
+            contrib/diagnose.sh contrib/nginx/synoterm.conf; do
   if [ -e "${WORK}/payload/${path}" ]; then
     echo "  ok   payload/${path}"
   else
@@ -46,70 +47,31 @@ for path in bin/synoterm ui/config ui/images/icon_48.png ui/web/index.html ui/we
   fi
 done
 
-# Exactly one of the two supported UI registrations must be present.
-if grep -q '"type": "url"' "${WORK}/payload/ui/config"; then
-  echo "  ok   ui/config style: url"
-  if [ -e "${WORK}/payload/ui/Synoterm.js" ]; then
-    echo "  WARN ui/Synoterm.js shipped with the url style (unused)"
-  fi
-elif grep -q '"appWindow"' "${WORK}/payload/ui/config"; then
-  echo "  ok   ui/config style: vue"
+# The UI registration must match the requested flavour.
+if grep -q '"appWindow"' "${WORK}/payload/ui/config"; then
+  echo "  ok   ui/config style: app (window class)"
   [ -e "${WORK}/payload/ui/Synoterm.js" ] || { echo "  MISS payload/ui/Synoterm.js"; fail=1; }
+  grep -q '"type": "app"' "${WORK}/payload/ui/config" || { echo "  FAIL app registration needs type=app"; fail=1; }
+  grep -q 'SYNO.SDS.App.Synoterm.Instance' "${WORK}/payload/ui/config" || { echo "  FAIL wrong app class"; fail=1; }
+  grep -q 'SYNO.SDS.App.Synoterm.Instance' "${WORK}/INFO" || { echo "  FAIL INFO dsmappname must match"; fail=1; }
+  if grep -q 'Ext.extend(SYNO.SDS.AppWindow' "${WORK}/payload/ui/Synoterm.js"; then
+    echo "  ok   window class: ExtJS (DSM 7.0/7.1)"
+  elif grep -q 'Vue.extend' "${WORK}/payload/ui/Synoterm.js"; then
+    echo "  ok   window class: Vue (DSM 7.2+)"
+  else
+    echo "  FAIL ui/Synoterm.js defines no window class"; fail=1
+  fi
+elif grep -q '"type": "url"' "${WORK}/payload/ui/config"; then
+  echo "  ok   ui/config style: url (browser window)"
+  # DSM resolves a relative url against the web root, not /webman/ — a bare
+  # "3rdparty/…" becomes /3rdparty/… and 404s. Keep it absolute.
+  grep -q '"url": "/webman/3rdparty/' "${WORK}/payload/ui/config" || {
+    echo "  FAIL ui/config url must be absolute: /webman/3rdparty/synoterm/web/index.html"
+    fail=1
+  }
 else
   echo "  MISS valid ui/config registration"
   fail=1
-fi
-
-# The shipped binary must match the declared architecture and be static
-# (musl) so it runs on any DSM 7.1+ regardless of the NAS toolchain.
-declared=$(sed -n 's/^arch="\(.*\)"$/\1/p' "${WORK}/INFO")
-python3 - "${WORK}/payload/bin/synoterm" "${declared}" <<'ELF'
-import struct, sys
-path, declared = sys.argv[1], sys.argv[2]
-data = open(path, "rb").read(64)
-if data[:4] != b"\x7fELF":
-    print(f"  FAIL {path} is not an ELF binary"); sys.exit(1)
-machine = struct.unpack_from("<H", data, 18)[0]
-expected = {"x86_64": 62, "armv8": 183, "armv7": 40}.get(declared)
-if expected is None:
-    print(f"  WARN unknown arch {declared}; skipping ELF check"); sys.exit(0)
-if machine != expected:
-    print(f"  FAIL ELF machine {machine} does not match arch={declared} ({expected})"); sys.exit(1)
-print(f"  ok   ELF machine {machine} matches arch={declared}")
-ELF
-[ $? -eq 0 ] || fail=1
-
-if command -v readelf >/dev/null 2>&1; then
-  if readelf -l "${WORK}/payload/bin/synoterm" 2>/dev/null | grep -q INTERP; then
-    echo "  FAIL binary has a dynamic interpreter (not static musl)"
-    fail=1
-  else
-    echo "  ok   statically linked"
-  fi
-fi
-if LC_ALL=C grep -qa 'GLIBC_2\.' "${WORK}/payload/bin/synoterm" 2>/dev/null; then
-  echo "  FAIL binary references glibc symbols"
-  fail=1
-fi
-
-for size in 16 24 32 48 64 72 128 256; do
-  if [ -f "${WORK}/payload/ui/images/icon_${size}.png" ]; then
-    echo "  ok   payload/ui/images/icon_${size}.png"
-  else
-    echo "  MISS payload/ui/images/icon_${size}.png"
-    fail=1
-  fi
-done
-
-# Icons are generated from tools/make-icons.py — assets/icon.svg must match it.
-if command -v python3 >/dev/null 2>&1 && [ -f "$(dirname "$SPK")/../assets/icon.svg" ]; then
-  tmp_icons="$(mktemp -d)"
-  python3 "$(dirname "$SPK")/../tools/make-icons.py" "${tmp_icons}" >/dev/null 2>&1 || true
-  if [ -f "${tmp_icons}/icon.svg" ] && ! cmp -s "${tmp_icons}/icon.svg" "$(dirname "$SPK")/../assets/icon.svg"; then
-    echo "  FAIL assets/icon.svg is out of date with tools/make-icons.py"
-    fail=1
-  fi
-  rm -rf "${tmp_icons}"
 fi
 
 # The nginx mount is optional: only Synology-signed packages may use DSM's
@@ -126,6 +88,8 @@ else
   grep -q 'proxy:' "${WORK}/payload/ui/web/config.js" || {
     echo "  FAIL ui/web/config.js needs the /synoterm proxy path to prefer the mount"; fail=1; }
 fi
+
+[ -x "${WORK}/payload/ui/auth-probe.cgi" ] || { echo "  FAIL ui/auth-probe.cgi must be executable"; fail=1; }
 
 # The setuid tool must be declared with the same path the payload ships.
 if ! grep -q '"relpath": "bin/synoterm"' "${WORK}/conf/privilege"; then

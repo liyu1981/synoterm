@@ -418,8 +418,12 @@ nas_build_number() {
 nas_build_spk() { # nas_build_spk <ui-style> ; sets SPK_VERSION, SPK_FILE
   local ui_style="$1" build_number
   build_number="$(nas_build_number)"
-  SPK_VERSION="0.1.0-${build_number}"
-  [ "${ui_style}" = "vue" ] && SPK_VERSION="0.1.1-${build_number}"
+  # Distinct feature numbers per flavour, so switching flavour is an upgrade.
+  case "${ui_style}" in
+    extjs) SPK_VERSION="0.1.0-${build_number}" ;;
+    vue)   SPK_VERSION="0.1.1-${build_number}" ;;
+    *)     SPK_VERSION="0.1.2-${build_number}" ;;
+  esac
   SPK_FILE="${ROOT}/build/synoterm-${SPK_VERSION}-${ARCH}.spk"
 
   note "building ${SPK_VERSION} for ${ARCH} (os_min_ver=${OS_MIN_VER}, ui=${ui_style})…"

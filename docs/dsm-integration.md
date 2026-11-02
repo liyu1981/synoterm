@@ -152,6 +152,36 @@ Notes:
   *Control Panel → Security → Firewall*.
 * The mount avoids both problems: same origin, TLS by DSM, no extra port.
 
+### 4.1b Token discovery (what the `.url`/ExtJS page does)
+
+`authenticate.cgi` needs the session **cookie *and* the SynoToken** on DSM 7.1
+(cookie only → exit 7, empty output, measured on 7.1.1-42962). The UI therefore
+looks for the token, recording every source it tried in
+`window.synotermTokenSources`:
+
+1. `?SynoToken=` on the page URL (percent-encoded forms too),
+2. the DSM desktop frame/opener/top: its **own `location.search`** (DSM redirects
+   to `…/index.cgi?SynoToken=…` after login), globals (`SynoToken`, `_SynoToken`,
+   `SYNO.SDS.Session.getSynoToken()`, `Ext.util.Cookies`), its cookies, and a
+   scan of its DOM,
+3. `fetch('/webman/index.cgi')` and `/webman/desktop/index.html`, same-origin,
+4. the package's own `ui/auth-probe.cgi` (diagnostic, see below),
+5. cookies visible to the page.
+
+If the token cannot be found the backend answers
+`401 DSM rejected the session - the SynoToken was not presented`, and the UI prints
+`no DSM token found`. To see what DSM offers on a given build, open:
+
+```
+http://<nas>:5000/webman/3rdparty/synoterm/auth-probe.cgi
+```
+
+It reports `remote_user`, whether the request carried a token
+(`syno_token_env_present`), `authenticate.cgi`'s exit status and the account it
+returned — without printing any secret value. That output decides whether the
+fallback (a CGI minting a short-lived, HMAC-signed identity for the backend)
+is needed.
+
 ### 4.2 Same thing without the helper script
 
 *Control Panel → Login Portal → Advanced → Reverse Proxy → Create*: source
@@ -168,129 +198,95 @@ SYNOTERM_NGINX_MOUNT=1 ./tools/build-spk.sh x86_64 0.1.0-1
 That build adds `conf/resource` (DSM applies the mount itself through its
 internal worker) and is only installable if the package is signed by Synology.
 
-## 5. `ui/` — desktop application
+## 5. `ui/` — a real DSM window (ExtJS, 7.0/7.1)
 
-Two registrations are supported. The build picks one with
-`SYNOTERM_UI_STYLE` (default `url`):
+Two registrations exist and they behave very differently:
 
-| Style | Files | DSM versions | `SynoToken` |
-| --- | --- | --- | --- |
-| `url` (default, and always used on 7.0/7.1) | `ui/config.url` → `ui/config` | documented for 7.x, safe for the **7.1 floor** | not injected; the UI extracts the token from the same-origin DSM desktop (§5.3) |
-| (default URL value) | `3rdparty/synoterm/web/index.html` | relative to `/webman/`, per Synology's example | — |
-| `vue` | `ui/config.vue` + `ui/Synoterm.js` | DSM **7.2+** desktop framework | DSM appends `?SynoToken=` to the wrapper script, which forwards it |
+| `ui/config` | what DSM does |
+| --- | --- |
+| `"type": "url"` + `"url": …` | opens a **browser window/tab** at that address (address bar visible) |
+| `"type": "app"` + `"appWindow": "<class>"` | opens a **DSM desktop window**: title bar, minimise/maximise, resize, taskbar entry, remembered geometry |
 
-### 5.1 `url` style (default, 7.1-safe)
-
-`ui/config`:
-
-```json
-{
-  ".url": {
-    "SYNO.SDS.Synoterm.Instance": {
-      "type": "url",
-      "title": "Terminal",
-      "desc": "An interactive, multi-tab terminal for DSM.",
-      "icon": "images/icon_{0}.png",
-      "url": "webman/3rdparty/synoterm/web/index.html",
-      "allUsers": false
-    }
-  }
-}
-```
-
-* `type: "url"` + a relative `url` is the form documented in Synology's
-  *Application Config* page, which has existed since DSM 6 and is therefore the
-  lowest-risk choice for a 7.1 floor.
-* `allUsers: false` → administrators only (matches the v1 policy).
-* Nothing is injected into the page URL, so the frontend discovers the
-  WebSocket endpoint from `ui/web/config.js` (written at packaging time) and
-  tries, in order, `?SynoToken=`, the same-origin parent DSM frame, and the
-  token cookie. If no token is available the backend authenticates with the
-  cookie alone.
-* **to verify (M1):** whether `authenticate.cgi` accepts cookie-only requests on
-  7.1. If it does not, use the `vue` style (7.2) or an ExtJS wrapper for 7.1
-  (see 5.3).
-
-### 5.2 `vue` style (DSM 7.2+)
-
-`ui/config`:
-
-```json
-{
-  "Synoterm.js": {
-    "SYNO.SDS.App.Synoterm.Instance": {
-      "type": "app",
-      "title": "Terminal",
-      "appWindow": "SYNO.SDS.App.Synoterm.Instance",
-      "allUsers": false,
-      "allowMultiInstance": false,
-      "hidden": false,
-      "icon": "images/icon_{0}.png",
-      "depend": []
-    }
-  }
-}
-```
-
-`ui/Synoterm.js` defines the class with DSM's Vue globals and hosts the terminal
-in an **iframe** so DSM's CSS/JS never touches xterm.js:
+On DSM 7.0/7.1 the desktop is ExtJS, so the window class is built from DSM's own
+`SYNO.SDS.AppWindow`, and the entry point from `SYNO.SDS.AppInstance`:
 
 ```js
-SYNO.namespace("SYNO.SDS.App.Synoterm");
-SYNO.SDS.App.Synoterm.Instance = Vue.extend({
-  template: [
-    '<v-app-instance class-name="SYNO.SDS.App.Synoterm.Instance">',
-    '  <v-app-window width="1040" height="680" :resizable="true"',
-    '                syno-id="SYNO.SDS.App.Synoterm.Window">',
-    '    <iframe :src="frameSrc" style="width:100%;height:100%;border:0"></iframe>',
-    '  </v-app-window>',
-    '</v-app-instance>',
-  ].join(""),
+// ui/Synoterm.js — loaded by DSM because ui/config names it
+Ext.ns("SYNO.SDS.App.Synoterm");
+
+SYNO.SDS.App.Synoterm = Ext.extend(SYNO.SDS.AppWindow, {
+  constructor: function () {
+    SYNO.SDS.App.Synoterm.superclass.constructor.call(this, {
+      width: 1000, height: 650, minWidth: 480, minHeight: 320,
+      maximizable: true, resizable: true, layout: "fit",
+      title: "Terminal",
+      items: [{
+        xtype: "panel", border: false, layout: "fit",
+        html: '<iframe src="/webman/3rdparty/synoterm/web/index.html" ' +
+              'style="display:block;width:100%;height:100%;border:0"></iframe>'
+      }],
+      listeners: { show: …, activate: …, destroy: …, scope: this }
+    });
+  },
+  // clicks inside an iframe do not bubble: raise the window on mousedown
+});
+
+SYNO.SDS.App.Synoterm.Instance = Ext.extend(SYNO.SDS.AppInstance, {
+  appWindowName: "SYNO.SDS.App.Synoterm"
 });
 ```
 
-The iframe URL carries `ws=/synoterm/ws` and `SynoToken=…` (read from the
-wrapper script's own `src`, where DSM appends it).
+`ui/config` then maps the file to the classes it defines:
 
-### 5.3 Token discovery in the `.url` build (implemented)
-
-On DSM 7.1 `authenticate.cgi` rejects a cookie-only request (verified on
-7.1.1-42962: `cookie only -> <empty> (exit 7)`, `cookie + token -> user`), while
-the `.url` registration injects no token. The page is same-origin with the DSM
-desktop, so the bundle now discovers the token itself, in order:
-
-1. `?SynoToken=` on the page URL (the 7.2 wrapper forwards it),
-2. the DSM desktop window (`parent`/`opener`/`top`): `SynoToken`/`_SynoToken`
-   globals, `SYNO.SDS.Session.getSynoToken()`, its cookies, and a scan of its
-   DOM for `SynoToken: "…"`,
-3. `fetch('/webman/index.cgi')` and the same regex over the desktop HTML,
-4. a `SynoToken` cookie.
-
-The source is logged to the console (`synoterm: DSM token from …`) and shown in
-the status bar when a connection is refused, so a failure is diagnosable.
-
-### 5.4 Fallback if 7.1 needs a token and discovery fails: ExtJS wrapper
-
-If M1 shows that cookie-only auth is rejected on 7.1 *and* the `.url` style is
-preferred over the 7.2 Vue framework, the third option is the classic ExtJS
-class registration documented in Synology's *UI files* page
-(`type: "app"` + `appWindow`, class defined with `Ext.define`, an iframe panel
-inside a `SYNO.SDS._ThirdParty.App.BaseWindow`). It is not shipped today because
-it cannot be verified without a 7.1 device; the two styles above cover both
-ends of the range.
-
-### Icons and runtime config
-
-* `images/icon_{16,24,32,48,64,72,128,256}.png`, plus
-  `PACKAGE_ICON.PNG` / `PACKAGE_ICON_256.PNG` at the SPK root.
-* `ui/web/config.js` is generated by `tools/build-spk.sh`:
-
-```js
-window.SYNOTERM_CONFIG = { ws: "/synoterm/ws" };
+```json
+{ "Synoterm.js": {
+    "SYNO.SDS.App.Synoterm.Instance": {
+      "type": "app", "appWindow": "SYNO.SDS.App.Synoterm",
+      "icon": "images/icon_{0}.png", "allUsers": false,
+      "allowMultiInstance": true, "maxInstance": 4,
+      "allowSharing": true, "allowStandalone": false,
+      "depend": ["SYNO.SDS.App.Synoterm"] },
+    "SYNO.SDS.App.Synoterm": { "type": "lib", "icon": "images/icon_{0}.png", "depend": [] }
+} }
 ```
 
-Without it the bundle derives the WebSocket path from the page URL, which is
-only correct when the UI is served from the same mount as the proxy.
+`INFO` needs `dsmuidir="ui"` and `dsmappname="SYNO.SDS.App.Synoterm.Instance"` to
+match, which it does. `allowMultiInstance`/`maxInstance` give one DSM window per
+terminal; `allowStandalone: false` keeps it out of a browser popup.
+
+### 5.1 Why the window body is an iframe
+
+Embedding xterm.js directly into the ExtJS panel is possible — the panel would
+host a `<div>` and the bundle would mount into it from `afterrender` — but the
+iframe buys three things and costs nothing measurable:
+
+* **isolation** — xterm.js measures its own font metrics and ships its own CSS;
+  DSM's ExtJS stylesheets and global font rules cannot disturb it, and a render
+  problem cannot wedge the desktop;
+* **lifecycle** — destroying the window destroys the frame, which closes the
+  WebSocket, frees the PTY and every timer with it;
+* **multi-instance** — each window gets its own JS context, so the terminal UI
+  needs no per-window plumbing (it is written as a single-page app).
+
+The frame is same-origin with DSM (`/webman/3rdparty/synoterm/web/`), so the
+`SynoToken` is readable from the desktop page and the DSM cookie is sent to the
+terminal's own port; keystrokes and output cross the boundary as the same
+WebSocket frames, so there is no added latency.
+
+Relative vs absolute: DSM resolves a relative `url` against the web root, so the
+iframe `src` (and the `url` registration) must be absolute —
+`/webman/3rdparty/synoterm/web/index.html`. `3rdparty/…` resolves to
+`/3rdparty/…` and 404s (confirmed on 7.1.1).
+
+### 5.2 Other flavours
+
+`SYNOTERM_UI_STYLE` selects the registration at build time (default `extjs`):
+
+| value | window | notes |
+| --- | --- | --- |
+| `extjs` | real DSM window (7.0/7.1) | **default**, target for 7.1 |
+| `vue` | real DSM window (7.2+) | `<v-app-window>`; the 7.2 equivalent |
+| `url` | browser window | diagnostic only; address bar visible |
 
 ## 6. Authentication: who is calling?
 

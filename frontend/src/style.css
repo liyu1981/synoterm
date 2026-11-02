@@ -1,11 +1,12 @@
 :root {
-  --bg: #10161d;
-  --bg-raised: #18222d;
-  --fg: #c8d3e0;
-  --fg-dim: #7d8a99;
-  --accent: #61dafb;
-  --danger: #ff6b6b;
-  --border: #263241;
+  /* Same family as the terminal palette in main.js. */
+  --bg: #0f1720;
+  --bg-raised: #16222e;
+  --fg: #d7e0ea;
+  --fg-dim: #8698ab;
+  --accent: #7ee0ff;
+  --danger: #ff7a85;
+  --border: #24384a;
   color-scheme: dark;
 }
 
@@ -86,7 +87,7 @@ body {
 }
 
 .tab[data-state="open"] .dot {
-  background: #57d38c;
+  background: #8ce99a;
 }
 
 .tab[data-state="error"] .dot {
@@ -263,7 +264,7 @@ body {
 }
 
 .settings-actions #settings-close {
-  background: rgba(97, 218, 251, 0.12);
+  background: rgba(126, 224, 255, 0.12);
   border-color: var(--accent);
   color: var(--accent);
 }

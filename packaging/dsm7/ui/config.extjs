@@ -1,0 +1,24 @@
+{
+  "Synoterm.js": {
+    "SYNO.SDS.App.Synoterm.Instance": {
+      "type": "app",
+      "title": "Terminal",
+      "desc": "An interactive terminal on this NAS.",
+      "icon": "images/icon_{0}.png",
+      "appWindow": "SYNO.SDS.App.Synoterm",
+      "allUsers": false,
+      "allowMultiInstance": true,
+      "maxInstance": 4,
+      "allowSharing": true,
+      "allowStandalone": false,
+      "hidden": false,
+      "depend": ["SYNO.SDS.App.Synoterm"]
+    },
+    "SYNO.SDS.App.Synoterm": {
+      "type": "lib",
+      "title": "Terminal",
+      "icon": "images/icon_{0}.png",
+      "depend": []
+    }
+  }
+}

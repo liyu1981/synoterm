@@ -35,7 +35,7 @@ LOG_FILE=""
 ARCH_OVERRIDE=""
 REMOTE_DIR_ARG=""
 COOKIE_ARG=""
-UI_STYLE="url"
+UI_STYLE="extjs"
 DO_UNINSTALL=0
 VERIFY_ONLY=0
 TRY_CLI=0
@@ -50,7 +50,9 @@ Options:
   --dsm-port <port>   DSM HTTPS port (default: 5001)
   --dsm-user <name>   DSM account for the verification login (default: admin)
   --arch <arch>       x86_64 | armv8 | armv7 (default: detect)
-  --ui-style url|vue  desktop registration flavour (default: url, 7.1-safe)
+  --ui-style extjs|vue|url  desktop registration (default: extjs — a real DSM
+                      window on 7.0/7.1; vue is the 7.2+ equivalent, url opens a
+                      browser window and is only a diagnostic)
   --cookie '<header>' use an existing Cookie header instead of logging in
   --remote-dir <path> directory on the NAS for the upload (default: $HOME/.synoterm-test)
   --try-cli-install   attempt 'synopkg install' anyway (DSM 7 refuses unsigned
@@ -89,7 +91,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "${NAS}" ] || { usage >&2; exit 2; }
-case "${UI_STYLE}" in url|vue) ;; *) echo "--ui-style must be url or vue" >&2; exit 2 ;; esac
+case "${UI_STYLE}" in extjs|vue|url) ;; *) echo "--ui-style must be extjs, vue or url" >&2; exit 2 ;; esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/nas-common.sh

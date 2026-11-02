@@ -17,12 +17,13 @@
 #         "non-synology-signed package should not use internal worker".
 #     0 — no privileged resource at all: DSM serves the UI from ui/web and the
 #         terminal talks to the package's own port (see docs/dsm-integration.md).
-#   SYNOTERM_UI_STYLE  url | vue   (default: url)
-#     url — documented `.url` registration; works on DSM 7.0/7.1/7.2 and opens
-#           the app URL in a DSM-managed window. No SynoToken injection.
-#     vue — DSM 7.2 desktop framework (`type: "app"` + <v-app-window>), which
-#           does receive `?SynoToken=` on the wrapper script and can forward it.
-#           Requires DSM 7.2+.
+#   SYNOTERM_UI_STYLE  extjs | vue | url   (default: extjs)
+#     extjs — DSM 7.0/7.1 desktop window (`type: "app"` + appWindow class built
+#             with Ext.extend(SYNO.SDS.AppWindow, …)). A real DSM window, not a
+#             browser popup. This is the target for DSM 7.1.
+#     vue   — DSM 7.2+ desktop framework (`<v-app-window>`).
+#     url   — documented `.url` registration; opens the URL in a browser
+#             window. Kept as a diagnostic fallback.
 #
 # Output: build/synoterm-<version>-<arch>.spk
 set -eu
@@ -46,10 +47,10 @@ esac
 OS_MIN_VER="${SYNOTERM_OS_MIN_VER:-7.1-42661}"
 NGINX_MOUNT="${SYNOTERM_NGINX_MOUNT:-0}"
 case "${NGINX_MOUNT}" in 0|1) ;; *) echo "SYNOTERM_NGINX_MOUNT must be 0 or 1" >&2; exit 2 ;; esac
-UI_STYLE="${SYNOTERM_UI_STYLE:-url}"
+UI_STYLE="${SYNOTERM_UI_STYLE:-extjs}"
 case "${UI_STYLE}" in
-  url|vue) ;;
-  *) echo "SYNOTERM_UI_STYLE must be 'url' or 'vue', got '${UI_STYLE}'" >&2; exit 2 ;;
+  extjs|vue|url) ;;
+  *) echo "SYNOTERM_UI_STYLE must be extjs, vue or url, got '${UI_STYLE}'" >&2; exit 2 ;;
 esac
 
 MAINTAINER="${SYNOTERM_MAINTAINER:-synoterm}"
@@ -88,9 +89,12 @@ if [ "${NGINX_MOUNT}" = "1" ]; then
   cp "${ROOT}/packaging/dsm7/contrib/nginx/synoterm.conf" "${PAYLOAD}/nginx/synoterm.conf"
 fi
 cp "${ROOT}/packaging/dsm7/ui/config.${UI_STYLE}" "${PAYLOAD}/ui/config"
-if [ "${UI_STYLE}" = "vue" ]; then
-  cp "${ROOT}/packaging/dsm7/ui/Synoterm.js" "${PAYLOAD}/ui/Synoterm.js"
-fi
+# DSM loads the JS file named as the key in ui/config, so the payload file is
+# always Synoterm.js regardless of which wrapper implements the window.
+case "${UI_STYLE}" in
+  extjs) cp "${ROOT}/packaging/dsm7/ui/Synoterm.extjs.js" "${PAYLOAD}/ui/Synoterm.js" ;;
+  vue)   cp "${ROOT}/packaging/dsm7/ui/Synoterm.vue.js" "${PAYLOAD}/ui/Synoterm.js" ;;
+esac
 cp "${ROOT}"/frontend/dist/* "${PAYLOAD}/ui/web/"
 # Tell the bundle where the backend is. It cannot be derived from the page URL:
 # with the package the page is served by DSM (/webman/3rdparty/synoterm/web/)
@@ -98,6 +102,11 @@ cp "${ROOT}"/frontend/dist/* "${PAYLOAD}/ui/web/"
 # The UI prefers the same-origin mount when it answers and falls back to the
 # package's own port, so one bundle works with and without the manual step.
 printf 'window.SYNOTERM_CONFIG = { proxy: "/synoterm", port: 7381 };\n' > "${PAYLOAD}/ui/web/config.js"
+
+# Diagnostic CGI (webman executes *.cgi from the package's ui dir). Harmless at
+# runtime; it tells us what DSM hands to a package CGI on this build.
+cp "${ROOT}/packaging/dsm7/ui/auth-probe.cgi" "${PAYLOAD}/ui/auth-probe.cgi"
+chmod 755 "${PAYLOAD}/ui/auth-probe.cgi"
 
 python3 "${ROOT}/tools/make-icons.py" "${PAYLOAD}/ui/images" >/dev/null
 python3 "${ROOT}/tools/make-icons.py" "${STAGING}/icons" >/dev/null

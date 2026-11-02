@@ -283,37 +283,20 @@ ${DSM_OTP:+data-urlencode = \"otp_code=${DSM_OTP}\"}"
   if [ -n "${FORCE_UI_STYLE}" ]; then
     UI_STYLE="${FORCE_UI_STYLE}"
     note "ui style forced with --ui-style ${UI_STYLE}"
-  elif [ "${COOKIE_ONLY_OK}" = "yes" ]; then
-    UI_STYLE="url"
-  elif [ "${COOKIE_ONLY_OK}" = "no" ]; then
-    # A token is required. The Vue wrapper (which is handed ?SynoToken=) needs
-    # DSM 7.2's desktop framework; on 7.0/7.1 stay with the documented .url
-    # registration, whose UI discovers the token from the DSM desktop instead.
+  else
+    # The window flavour is a DSM-version choice: ExtJS app windows on 7.0/7.1,
+    # the Vue framework on 7.2+. It has nothing to do with the token probe.
     case "${DSM_MAJOR_MINOR}" in
-      7.0|7.1|7.0.*|7.1.*)
-        UI_STYLE="url"
-        warn "this DSM needs the token; keeping the 7.1-safe .url build"
-        note "the UI reads the token from the same-origin DSM desktop (see"
-        note "docs/dsm-integration.md §5.3), so no 7.2 wrapper is involved"
-        ;;
-      *)
-        UI_STYLE="vue"
-        ;;
+      7.0|7.1|7.0.*|7.1.*) UI_STYLE="extjs" ;;
+      *) UI_STYLE="vue" ;;
     esac
-  elif [ "${YES}" -eq 0 ]; then
-    printf '\n  Could not decide automatically. Use the 7.2 vue build instead of .url? [y/N] '
-    read -r use_vue || true
-    case "${use_vue:-n}" in y|Y) UI_STYLE="vue" ;; *) UI_STYLE="url" ;; esac
-  else
-    UI_STYLE="url"
   fi
 
-
-  if [ "${UI_STYLE}" = "vue" ]; then
-    warn "selected the vue build (needs DSM 7.2's desktop framework)"
-  else
-    ok "selected the .url build (safe on DSM 7.0/7.1 and newer)"
-  fi
+  case "${UI_STYLE}" in
+    extjs) ok "selected the ExtJS app-window build (DSM 7.0/7.1)" ;;
+    vue) warn "selected the Vue build (needs DSM 7.2's desktop framework)" ;;
+    *) ok "selected the .url build (opens a browser window — diagnostic only)" ;;
+  esac
 fi
 
 UI_STYLE="${UI_STYLE:-url}"

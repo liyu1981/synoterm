@@ -16,9 +16,11 @@ CONF="${VAR}/etc/synoterm.conf"
 # Optional overrides (postinst writes a commented template):
 #   REQUIRE_GROUP=administrators   group a DSM account must belong to
 #   MAX_SESSIONS=8                 concurrent terminal limit
+#   BIND=auto                      listen address: auto | 0.0.0.0 | 127.0.0.1
 #   EXTRA_ARGS=                    any other synoterm flag
 REQUIRE_GROUP="administrators"
 MAX_SESSIONS="8"
+BIND="auto"
 EXTRA_ARGS=""
 if [ -r "${CONF}" ]; then
   # shellcheck disable=SC1090
@@ -29,11 +31,42 @@ RUNTIME="${VAR}/runtime"
 PID_FILE="${RUNTIME}/synoterm.pid"
 LOG_FILE="${RUNTIME}/synoterm.log"
 
+# Is something accepting TCP connections on the port? Uses netstat/ss rather
+# than bash's /dev/tcp, because this script is POSIX sh (dash has no /dev/tcp).
+port_listening() {
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | grep -q "[:.]${PORT} "
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -q "[:.]${PORT} "
+  else
+    return 0  # cannot tell: do not fail a start we cannot verify
+  fi
+}
+
 is_running() {
   [ -f "${PID_FILE}" ] || return 1
   pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
   [ -n "${pid}" ] || return 1
   kill -0 "${pid}" 2>/dev/null
+}
+
+# Where must the backend listen?
+#   - the nginx mount (contrib/install-nginx-mount.sh) proxies 127.0.0.1:7381,
+#     so loopback is enough and nothing is exposed to the LAN;
+#   - without the mount the DSM-served page (http://nas:5000/...) talks to the
+#     backend directly from the browser, which needs a LAN-reachable socket.
+# "auto" detects the mount by looking for the snippet the helper installs.
+resolve_bind() {
+  case "${BIND}" in
+    0.0.0.0|127.0.0.1) printf '%s\n' "${BIND}"; return 0 ;;
+  esac
+  for candidate in /usr/local/etc/nginx/conf.d/synoterm.conf \
+                   /usr/syno/etc/nginx/conf.d/synoterm.conf \
+                   /usr/syno/etc/nginx/conf.d/www.synoterm.conf \
+                   /etc/nginx/conf.d/synoterm.conf; do
+    [ -f "${candidate}" ] && { printf '127.0.0.1\n'; return 0; }
+  done
+  printf '0.0.0.0\n'
 }
 
 case "${1:-}" in
@@ -48,6 +81,7 @@ case "${1:-}" in
     # snippet is missing (for example right after an upgrade).
     HOME="${VAR}/home" nohup "${BIN}" \
       --listen "${PORT}" \
+      --bind "$(resolve_bind)" \
       --auth dsm \
       --base-path /synoterm \
       --web-root "${DEST}/ui/web" \
@@ -57,13 +91,33 @@ case "${1:-}" in
       >>"${LOG_FILE}" 2>&1 &
     pid=$!
     echo "${pid}" >"${PID_FILE}"
-    sleep 1
+    echo "--- $(date '+%Y-%m-%d %H:%M:%S') start (bind $(resolve_bind)) ---" >>"${LOG_FILE}"
+
+    # Give it a moment, then require BOTH a live process and a listening port:
+    # a process that is alive but not listening is the failure people hit.
+    attempt=0
+    while [ "${attempt}" -lt 10 ]; do
+      sleep 0.5
+      attempt=$((attempt + 1))
+      kill -0 "${pid}" 2>/dev/null || break
+      if port_listening; then
+        exit 0
+      fi
+    done
+
     if ! kill -0 "${pid}" 2>/dev/null; then
       rm -f "${PID_FILE}"
-      echo "synoterm failed to start; see ${LOG_FILE}" >&2
+      echo "synoterm exited during startup. Last log lines:" >&2
+      tail -n 15 "${LOG_FILE}" >&2
       exit 1
     fi
-    exit 0
+    # Still running but not accepting connections: report it, and stop the
+    # orphan so Package Center's "failed" state matches reality.
+    echo "synoterm is running (pid ${pid}) but nothing is listening on port ${PORT}." >&2
+    tail -n 5 "${LOG_FILE}" >&2
+    kill "${pid}" 2>/dev/null || true
+    rm -f "${PID_FILE}"
+    exit 1
     ;;
   stop)
     if is_running; then

@@ -19,6 +19,13 @@ REQUIRE_GROUP="administrators"
 # Concurrent terminal limit across all users.
 MAX_SESSIONS="8"
 #
+# Listen address of the backend:
+#   auto      loopback when the nginx mount from contrib/ is installed, otherwise
+#             0.0.0.0 so the DSM-served page can reach it from your browser
+#   127.0.0.1 only loopback (the mount or a reverse proxy must be in place)
+#   0.0.0.0   always reachable on the LAN (still requires a DSM login)
+BIND="auto"
+#
 # Extra flags appended to the command line, e.g.:
 # EXTRA_ARGS="--idle-timeout 3600"
 EXTRA_ARGS=""

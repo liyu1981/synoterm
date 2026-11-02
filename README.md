@@ -54,8 +54,8 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
 | --- | --- |
 | Zig backend (HTTP, WebSocket, PTY bridge, resize) | working, unit tested |
 | xterm.js frontend (tabs, reconnect, fit, status bar, font settings) | working, e2e tested in headless Chromium |
-| DSM package skeleton (`INFO`, `conf/privilege`, `conf/resource`, nginx, `ui/`) | written; both UI registration styles build |
-| DSM session auth (`authenticate.cgi` + group check) | implemented, needs on-device verification |
+| DSM package skeleton (`INFO`, `conf/privilege`, nginx snippet, `ui/`) | written; ExtJS app-window registration is the default for 7.0/7.1 |
+| DSM session auth (`authenticate.cgi` + group check) | implemented; DSM 7.1 requires cookie **and** SynoToken — token discovery is being verified on-device (`ui/auth-probe.cgi` reports what DSM provides) |
 | Multi-arch SPK build (`tools/build-spk.sh`) | working (x86_64 verified, armv8/armv7 cross-compiled) |
 | v1 policy: DSM 7.1 floor, admins only, local accounts only, kill on disconnect | implemented |
 | Service config (`$SYNOPKG_PKGVAR/etc/synoterm.conf`: require-group, max sessions) | implemented |
