@@ -1,0 +1,4 @@
+#!/bin/sh
+# Runs before files are unpacked into $SYNOPKG_PKGDEST.
+set -eu
+exit 0

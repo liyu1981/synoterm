@@ -1,0 +1,75 @@
+#!/bin/sh
+# DSM service controller for synoterm.
+#
+# The server binary is installed with the setuid "tool" privilege (see
+# conf/privilege) so that it can fork a shell as the authenticated DSM user
+# while the package itself keeps running as the unprivileged package user.
+set -eu
+
+PKG_NAME="synoterm"
+PORT="7381"
+
+DEST="${SYNOPKG_PKGDEST:-/var/packages/${PKG_NAME}/target}"
+VAR="${SYNOPKG_PKGVAR:-/var/packages/${PKG_NAME}/var}"
+BIN="${DEST}/bin/synoterm"
+RUNTIME="${VAR}/runtime"
+PID_FILE="${RUNTIME}/synoterm.pid"
+LOG_FILE="${RUNTIME}/synoterm.log"
+
+is_running() {
+  [ -f "${PID_FILE}" ] || return 1
+  pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
+  [ -n "${pid}" ] || return 1
+  kill -0 "${pid}" 2>/dev/null
+}
+
+case "${1:-}" in
+  start)
+    if is_running; then
+      exit 0
+    fi
+    mkdir -p "${RUNTIME}" "${VAR}/home"
+    rm -f "${PID_FILE}"
+    # The web assets in ${DEST}/ui/web are also served statically by DSM; the
+    # binary serves them itself so that the app still works if the nginx
+    # snippet is missing (for example right after an upgrade).
+    HOME="${VAR}/home" nohup "${BIN}" \
+      --listen "${PORT}" \
+      --auth dsm \
+      --base-path /synoterm \
+      --web-root "${DEST}/ui/web" \
+      >>"${LOG_FILE}" 2>&1 &
+    pid=$!
+    echo "${pid}" >"${PID_FILE}"
+    sleep 1
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      rm -f "${PID_FILE}"
+      echo "synoterm failed to start; see ${LOG_FILE}" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  stop)
+    if is_running; then
+      pid="$(cat "${PID_FILE}")"
+      kill "${pid}" 2>/dev/null || true
+      i=0
+      while kill -0 "${pid}" 2>/dev/null && [ "${i}" -lt 20 ]; do
+        sleep 1
+        i=$((i + 1))
+      done
+      kill -9 "${pid}" 2>/dev/null || true
+    fi
+    rm -f "${PID_FILE}"
+    exit 0
+    ;;
+  status)
+    if is_running; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    exit 1
+    ;;
+esac

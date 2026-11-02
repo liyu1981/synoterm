@@ -1,0 +1,9 @@
+#!/bin/sh
+# Runs after the package payload has been installed.
+# The package user exists by now, so we can create its writable layout.
+set -eu
+
+VAR="${SYNOPKG_PKGVAR}"
+mkdir -p "${VAR}/home" "${VAR}/runtime"
+chmod 700 "${VAR}/home" "${VAR}/runtime"
+exit 0

@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  ZIG_VERSION: "0.17.0"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: zig unit tests
+        run: zig build test --summary all
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - name: frontend bundle
+        run: |
+          cd frontend
+          npm install --no-audit --no-fund
+          npm run build
+      - name: protocol smoke test
+        run: |
+          zig build
+          ./zig-out/bin/synoterm --listen 18080 --auth dev --web-root frontend/dist &
+          sleep 1
+          npm install --no-audit --no-fund
+          node tools/ws-test.mjs ws://127.0.0.1:18080/ws
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: build
+        run: |
+          zig build
+          cd frontend
+          npm install --no-audit --no-fund
+          npm run build
+      - name: install browser
+        run: |
+          npm install --no-audit --no-fund
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: browser test
+        run: node tools/e2e.mjs
+
+  spk:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+          - arch: armv8
+          - arch: armv7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: cross-compile backend
+        run: zig build -Doptimize=ReleaseSmall -Dtarget=${{ matrix.arch == 'x86_64' && 'x86_64-linux-musl' || matrix.arch == 'armv8' && 'aarch64-linux-musl' || 'arm-linux-musleabihf' }}
+      - name: build package
+        run: ./tools/build-spk.sh ${{ matrix.arch }} 0.1.0-${{ github.run_number }}
+      - name: verify package
+        run: ./tools/verify-spk.sh build/synoterm-0.1.0-${{ github.run_number }}-${{ matrix.arch }}.spk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synoterm-${{ matrix.arch }}
+          path: build/*.spk
+          if-no-files-found: error

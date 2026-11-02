@@ -1,0 +1,20 @@
+{
+  "web-config": {
+    "nginx-static-config": {
+      "enable": [
+        {
+          "type": "dsm",
+          "relpath": "nginx/synoterm.conf",
+          "ports": [
+            {
+              "port": 7381,
+              "protocol": "tcp",
+              "schema": "http"
+            }
+          ],
+          "alias": ["synoterm"]
+        }
+      ]
+    }
+  }
+}

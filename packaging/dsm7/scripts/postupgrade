@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+VAR="${SYNOPKG_PKGVAR}"
+mkdir -p "${VAR}/home" "${VAR}/runtime"
+chmod 700 "${VAR}/home" "${VAR}/runtime"
+exit 0

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>synoterm</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2318222d'/%3E%3Cpath d='M4.5 5l2.5 3-2.5 3' stroke='%2361dafb' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M9 11h3' stroke='%2361dafb' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <header id="tabbar">
+        <div id="tabs" role="tablist"></div>
+        <div id="tab-actions">
+          <button id="new-tab" type="button" title="New terminal (Ctrl+Shift+T)">+</button>
+        </div>
+        <div id="status"><span id="status-text">connecting…</span></div>
+      </header>
+      <main id="terminal-host"></main>
+    </div>
+    <script src="./app.js"></script>
+  </body>
+</html>

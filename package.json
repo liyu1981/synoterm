@@ -1,0 +1,14 @@
+{
+  "name": "synoterm-tools",
+  "private": true,
+  "type": "module",
+  "description": "Dev/test tooling for synoterm (the shipped code is Zig + a prebuilt frontend)",
+  "scripts": {
+    "e2e": "node tools/e2e.mjs",
+    "test:ws": "node tools/ws-test.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.55.0",
+    "ws": "^8.18.0"
+  }
+}

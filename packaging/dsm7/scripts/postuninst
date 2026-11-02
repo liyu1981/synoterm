@@ -1,0 +1,5 @@
+#!/bin/sh
+# Best effort: remove runtime state, keep nothing behind.
+set -eu
+rm -rf "${SYNOPKG_PKGVAR}/runtime"
+exit 0
