@@ -36,7 +36,7 @@ tar -xzf "${WORK}/package.tgz" -C "${WORK}/.." --one-top-level="${WORK}/payload"
   mkdir -p "${WORK}/payload"
   tar -xzf "${WORK}/package.tgz" -C "${WORK}/payload"
 }
-for path in bin/synoterm nginx/synoterm.conf ui/config ui/images/icon_48.png ui/web/index.html ui/web/app.js; do
+for path in bin/synoterm nginx/synoterm.conf ui/config ui/images/icon_48.png ui/web/index.html ui/web/app.js ui/web/icon.svg; do
   if [ -e "${WORK}/payload/${path}" ]; then
     echo "  ok   payload/${path}"
   else
@@ -89,6 +89,26 @@ fi
 if LC_ALL=C grep -qa 'GLIBC_2\.' "${WORK}/payload/bin/synoterm" 2>/dev/null; then
   echo "  FAIL binary references glibc symbols"
   fail=1
+fi
+
+for size in 16 24 32 48 64 72 128 256; do
+  if [ -f "${WORK}/payload/ui/images/icon_${size}.png" ]; then
+    echo "  ok   payload/ui/images/icon_${size}.png"
+  else
+    echo "  MISS payload/ui/images/icon_${size}.png"
+    fail=1
+  fi
+done
+
+# Icons are generated from tools/make-icons.py — assets/icon.svg must match it.
+if command -v python3 >/dev/null 2>&1 && [ -f "$(dirname "$SPK")/../assets/icon.svg" ]; then
+  tmp_icons="$(mktemp -d)"
+  python3 "$(dirname "$SPK")/../tools/make-icons.py" "${tmp_icons}" >/dev/null 2>&1 || true
+  if [ -f "${tmp_icons}/icon.svg" ] && ! cmp -s "${tmp_icons}/icon.svg" "$(dirname "$SPK")/../assets/icon.svg"; then
+    echo "  FAIL assets/icon.svg is out of date with tools/make-icons.py"
+    fail=1
+  fi
+  rm -rf "${tmp_icons}"
 fi
 
 # The setuid tool must be declared with the same path the payload ships.

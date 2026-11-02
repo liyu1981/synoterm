@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="synoterm">
+  <title>synoterm</title>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e2c3c"/>
+      <stop offset="1" stop-color="#0d141c"/>
+    </linearGradient>
+    <linearGradient id="prompt" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#96f2ff"/>
+      <stop offset="1" stop-color="#2fb0e2"/>
+    </linearGradient>
+  </defs>
+  <rect x="22.5" y="22.5" width="978.9" height="978.9"
+        rx="227.3" ry="227.3" fill="url(#plate)"/>
+  <rect x="28.7" y="28.7"
+        width="966.7" height="966.7"
+        rx="221.2" ry="221.2"
+        fill="none" stroke="#4a6480" stroke-opacity="0.9" stroke-width="12.3"/>
+  <polyline points="291.8,302.1 483.3,512.0 291.8,721.9" fill="none" stroke="url(#prompt)"
+            stroke-width="100.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="558.1" y="626.7" width="184.3" height="90.1"
+        rx="45.1" ry="45.1" fill="url(#prompt)"/>
+</svg>

@@ -177,14 +177,19 @@ async function discoverSynoToken() {
     if (value) return rememberToken(value, name);
   }
 
-  try {
-    const response = await fetch("/webman/index.cgi", { credentials: "same-origin" });
-    if (response.ok) {
-      const value = tokenFromText(await response.text());
-      if (value) return rememberToken(value, "/webman/index.cgi");
+  // Only ask DSM's desktop page when we are actually inside DSM: on a dev
+  // server this path does not exist and the 404 would show up in the console.
+  const insideDsm = window.parent !== window || window.location.pathname.startsWith("/webman/");
+  if (insideDsm) {
+    try {
+      const response = await fetch("/webman/index.cgi", { credentials: "same-origin" });
+      if (response.ok) {
+        const value = tokenFromText(await response.text());
+        if (value) return rememberToken(value, "/webman/index.cgi");
+      }
+    } catch {
+      /* not served from the DSM origin */
     }
-  } catch {
-    /* not served from the DSM origin (dev server) */
   }
 
   const match = document.cookie.match(/(?:^|;\s*)(?:SynoToken|_SynoToken)=([^;]+)/);

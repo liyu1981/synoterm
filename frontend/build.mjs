@@ -41,6 +41,7 @@ writeFileSync(
   join(outdir, "config.js"),
   'window.SYNOTERM_CONFIG = { ws: "" };\n',
 );
+cpSync(join(here, "..", "assets", "icon.svg"), join(outdir, "icon.svg"));
 // style.css is bundled into app.js as text and injected at boot, so DSM's
 // upgrade path cannot leave a stale <link> pointing at an old stylesheet.
 console.log("built", outdir);

@@ -33,6 +33,15 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             frontend/package-lock.json
+      - name: app icon is up to date with its generator
+        run: |
+          tmp="$(mktemp -d)"
+          python3 tools/make-icons.py "$tmp" >/dev/null
+          cmp "$tmp/icon.svg" assets/icon.svg || {
+            echo "::error::assets/icon.svg is stale — run python3 tools/make-icons.py and copy icon.svg"
+            exit 1
+          }
+
       - name: frontend bundle
         run: |
           cd frontend
