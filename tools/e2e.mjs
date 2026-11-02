@@ -7,7 +7,7 @@
 // Requires a Chromium/Chrome binary. Discovery order:
 //   $SYNOTERM_CHROMIUM, playwright's cache, system chromium/chrome.
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,6 +64,25 @@ const binary = join(root, "zig-out", "bin", "synoterm");
 if (!existsSync(binary)) {
   console.error(`e2e: ${binary} missing — run \`zig build\` first`);
   process.exit(1);
+}
+
+// Guard against a leftover cross-compiled binary (e.g. after build-spk.sh for
+// armv8): it cannot run here and the failure mode is a confusing "did not start".
+const hostMachine = { x64: 62, arm64: 183, arm: 40 }[process.arch];
+if (hostMachine) {
+  const header = readFileSync(binary).subarray(0, 20);
+  if (header[0] !== 0x7f || header[1] !== 0x45) {
+    console.error("e2e: binary is not an ELF file");
+    process.exit(1);
+  }
+  const machine = header.readUInt16LE(18);
+  if (machine !== hostMachine) {
+    console.error(
+      `e2e: ${binary} is built for ELF machine ${machine}, this host needs ${hostMachine}.\n` +
+        "     run `zig build` (native) before the e2e test.",
+    );
+    process.exit(1);
+  }
 }
 
 const server = spawn(
