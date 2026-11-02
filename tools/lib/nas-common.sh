@@ -133,6 +133,17 @@ read_nas() { # read-only remote command, executed even in --dry-run
   ssh "${SSH_OPTS[@]}" "${TARGET}" "$1"
 }
 
+# A non-interactive `sh -c` over SSH gets a minimal PATH: DSM's own tools
+# (synopkg, synonginx, ...) live in /usr/syno/bin and must be added explicitly.
+DSM_PATH="/usr/syno/bin:/usr/syno/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# GNU tar can pin entry mtimes; the NAS clock may be a second or two behind ours,
+# and otherwise every streamed file prints "time stamp … is … s in the future".
+TAR_MTIME=""
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+  TAR_MTIME="--mtime=@0 --owner=0 --group=0"
+fi
+
 on_nas() {
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  \033[2m[dry-run] ssh %s %s\033[0m\n' "${TARGET}" "$1"
@@ -147,8 +158,8 @@ on_nas_root() { # through sudo, with a TTY so the password prompt works
     printf '  \033[2m[dry-run] ssh -t %s "sudo: %s"\033[0m\n' "${TARGET}" "$1"
     return 0
   fi
-  trace "ssh -t ${TARGET} \"sudo sh -c '$(sq "$1")'\""
-  ssh -t "${SSH_OPTS[@]}" "${TARGET}" "sudo sh -c '$(sq "$1")'"
+  trace "ssh -t ${TARGET} \"sudo sh -c 'export PATH=${DSM_PATH}; $(sq "$1")'\""
+  ssh -t "${SSH_OPTS[@]}" "${TARGET}" "sudo sh -c 'export PATH=${DSM_PATH}; $(sq "$1")'"
   local status=$?
   [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
   return "${status}"
@@ -168,6 +179,9 @@ run_bundle() { # run_bundle "<remote command>" <local-file>[:name] ... (one ssh 
       rm -rf "${staging}"
       return 1
     }
+    # Fixed mtime: the NAS clock may differ from ours, and tar warns about
+    # timestamps "in the future" for every file it streams.
+    touch -t 197001010000.00 "${staging}/${name}" 2>/dev/null || true
     names+=("${name}")
   done
   trace "tar -cf - ${names[*]} | ssh ${TARGET} 'cd \$(mktemp -d) && tar -xf - && ${remote_cmd}'"
@@ -202,7 +216,7 @@ copy_tree_to_nas() { # <local-dir> <remote-dir>
     return 0
   fi
   trace "tar -czf - -C ${local_dir} . | ssh ${TARGET} \"tar -xzf - -C ${remote_dir}\""
-  (cd "${local_dir}" && tar -czf - .) | ssh "${SSH_OPTS[@]}" "${TARGET}" \
+  (cd "${local_dir}" && tar -czf - ${TAR_MTIME} .) | ssh "${SSH_OPTS[@]}" "${TARGET}" \
     "mkdir -p '${remote_dir}' && tar -xzf - -C '${remote_dir}'"
   local status=$?
   [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
@@ -211,14 +225,26 @@ copy_tree_to_nas() { # <local-dir> <remote-dir>
 
 # ------------------------------------------------------------------ detect --
 nas_detect() {
-  local un version_line model build major
+  local un version_line model build_info
   un="$(read_nas 'uname -m' 2>/dev/null | tr -d '\r')" || die "cannot reach ${TARGET} over SSH"
   [ -n "${un}" ] || die "could not read the architecture from ${NAS}"
-  version_line="$(read_nas '. /etc/VERSION 2>/dev/null; echo "${productversion:-?} build ${buildnumber:-?}"' | tr -d '\r')"
-  [ -n "${version_line}" ] || version_line="unknown (no /etc/VERSION)"
   model="$(read_nas 'cat /proc/sys/kernel/syno_hw_version 2>/dev/null' | tr -d '\r')"
-  build="$(read_nas '. /etc/VERSION 2>/dev/null; echo "${buildnumber:-0}"' | tr -d '\r')"
-  major="$(read_nas '. /etc/VERSION 2>/dev/null; echo "${majorversion:-7}.${minorversion:-1}"' | tr -d '\r')"
+
+  # One round-trip, and no bare "." (a failing special builtin aborts dash-like
+  # shells, which is how /etc/VERSION used to come back empty off-DSM).
+  version_line="$(read_nas 'if [ -r /etc/VERSION ]; then . /etc/VERSION; fi; echo "${productversion:-?}|${majorversion:-7}|${minorversion:-1}|${buildnumber:-}"' | tr -d '\r')"
+
+  local productversion="" major="7" minor="1"
+  IFS='|' read -r productversion major minor build <<<"${version_line}"
+  [ -n "${productversion}" ] || productversion="unknown"
+  [ -n "${major}" ] || major="7"
+  [ -n "${minor}" ] || minor="1"
+  local version_text
+  if [ -n "${build}" ]; then
+    version_text="${productversion} build ${build}"
+  else
+    version_text="unknown (no /etc/VERSION)"
+  fi
 
   case "${ARCH_OVERRIDE:-${un}}" in
     x86_64|amd64) ARCH=x86_64; ZIG_TARGET="x86_64-linux-musl" ;;
@@ -227,13 +253,13 @@ nas_detect() {
     *) die "unsupported architecture '${un}'" ;;
   esac
   ok "nas:   ${NAS} (model ${model:-unknown})"
-  ok "dsm:   ${version_line}"
+  ok "dsm:   ${version_text}"
   NAS_UNAME="${un}"
-  VERSION_LINE="${version_line}"
+  VERSION_LINE="${version_text}"
   ok "arch:  ${un} -> spk arch '${ARCH}'"
 
   MODEL="${model:-}"
-  DSM_MAJOR_MINOR="${major}"
+  DSM_MAJOR_MINOR="${major}.${minor}"
   DSM_BUILD="${build}"
   OS_MIN_VER="7.1-42661"
   case "${DSM_BUILD}" in
@@ -411,12 +437,28 @@ nas_install_spk() { # nas_install_spk <spk-file>
   fi
   ok "package uploaded and visible to the installer"
 
-  if on_nas_root "synopkg install '${remote_spk}'"; then
-    ok "synopkg install succeeded"
+  local synopkg="/usr/syno/bin/synopkg"
+  if ! read_nas "test -x '${synopkg}'" 2>/dev/null; then
+    synopkg="$(read_nas 'command -v synopkg 2>/dev/null' | tr -d '\r')"
+  fi
+  if [ -z "${synopkg}" ]; then
+    fail "this DSM has no 'synopkg' binary"
+    note "install the built package manually: DSM → Package Center → Manual Install"
+    note "  ${spk_file}"
+    return 1
+  fi
+  ok "installer: ${synopkg}"
+
+  if on_nas_root "${synopkg} install '${remote_spk}'"; then
+    ok "package install command succeeded"
   else
-    warn "synopkg reported an error — read the output above"
+    case $? in
+      127) fail "could not execute ${synopkg}" ;;
+      *) warn "the installer reported an error — read its output above" ;;
+    esac
     note "common causes: Package Center trust level still blocks unsigned"
     note "packages, or an older version is installed (uninstall first)"
+    return 1
   fi
   on_nas "rm -f '${remote_spk}'"
 }

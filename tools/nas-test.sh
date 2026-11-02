@@ -286,7 +286,20 @@ ${DSM_OTP:+data-urlencode = \"otp_code=${DSM_OTP}\"}"
   elif [ "${COOKIE_ONLY_OK}" = "yes" ]; then
     UI_STYLE="url"
   elif [ "${COOKIE_ONLY_OK}" = "no" ]; then
-    UI_STYLE="vue"
+    # A token is required. The Vue wrapper (which is handed ?SynoToken=) needs
+    # DSM 7.2's desktop framework; on 7.0/7.1 stay with the documented .url
+    # registration, whose UI discovers the token from the DSM desktop instead.
+    case "${DSM_MAJOR_MINOR}" in
+      7.0|7.1|7.0.*|7.1.*)
+        UI_STYLE="url"
+        warn "this DSM needs the token; keeping the 7.1-safe .url build"
+        note "the UI reads the token from the same-origin DSM desktop (see"
+        note "docs/dsm-integration.md §5.3), so no 7.2 wrapper is involved"
+        ;;
+      *)
+        UI_STYLE="vue"
+        ;;
+    esac
   elif [ "${YES}" -eq 0 ]; then
     printf '\n  Could not decide automatically. Use the 7.2 vue build instead of .url? [y/N] '
     read -r use_vue || true
@@ -297,9 +310,9 @@ ${DSM_OTP:+data-urlencode = \"otp_code=${DSM_OTP}\"}"
 
 
   if [ "${UI_STYLE}" = "vue" ]; then
-    warn "selected the vue build (DSM 7.2 desktop framework)"
+    warn "selected the vue build (needs DSM 7.2's desktop framework)"
   else
-    ok "selected the default .url build"
+    ok "selected the .url build (safe on DSM 7.0/7.1 and newer)"
   fi
 fi
 
@@ -631,11 +644,11 @@ else
 fi
 [ -n "${LOG_FILE}" ] && note "transcript: ${LOG_FILE}"
 
-if [ "${COOKIE_ONLY_OK}" = "no" ] && [ "${UI_STYLE}" = "vue" ]; then
+if [ "${COOKIE_ONLY_OK}" = "no" ] && [ "${UI_STYLE}" = "url" ]; then
   printf '\n'
-  warn "A token was required, but the vue wrapper needs DSM 7.2."
-  note "If this DSM is 7.1, the ExtJS wrapper (docs/dsm-integration.md §5.3) is"
-  note "needed instead — send the transcript above and it can be added."
+  note "A SynoToken is required on this DSM; the .url build extracts it from the"
+  note "same-origin DSM desktop at runtime. If the packaged window reports"
+  note "'no DSM token found', send the transcript — that is the ExtJS-wrapper case."
 fi
 
 step "done"

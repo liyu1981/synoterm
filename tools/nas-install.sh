@@ -152,14 +152,23 @@ why "Uploads the .spk and runs 'synopkg install' as root (sudo password needed).
 why "DSM unpacks the payload, applies the setuid tool privilege (4750), enables"
 why "the nginx mount /synoterm/ and starts the service."
 if confirm "Install $(basename "${SPK_FILE}") on ${NAS}?"; then
-  nas_install_spk "${SPK_FILE}"
-  step "5b/6  verify the installation"
-  nas_verify_install yes
+  installed_ok=0
+  if nas_install_spk "${SPK_FILE}"; then
+    step "5b/6  verify the installation"
+    if nas_verify_install yes; then installed_ok=1; fi
+  fi
   nas_dsm_logout
-  printf '\n'
-  bold "Open DSM → main menu → Terminal."
-  note "First load may ask nothing at all: the terminal runs as your DSM account."
-  note "Inside the terminal check: id; pwd; stty size"
+  if [ "${installed_ok}" -eq 1 ]; then
+    printf '\n'
+    bold "Open DSM → main menu → Terminal."
+    note "First load may ask nothing at all: the terminal runs as your DSM account."
+    note "Inside the terminal check: id; pwd; stty size"
+  else
+    printf '\n'
+    warn "the package is not installed — the steps above say why"
+    note "you can also install it by hand: DSM → Package Center → Manual Install"
+    note "  ${SPK_FILE}"
+  fi
 else
   note "skipped. The package was built at:"
   note "  ${SPK_FILE}"

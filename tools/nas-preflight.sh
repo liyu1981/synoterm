@@ -20,7 +20,7 @@ bad() { printf '  FAIL  %s\n' "$*"; rc=1; }
 say "== identity"
 if [ -r /etc/VERSION ]; then
   # majorversion="7" minorversion="1" buildnumber="42661" ...
-  . /etc/VERSION 2>/dev/null || true
+  if [ -r /etc/VERSION ]; then . /etc/VERSION; fi
   say "  DSM ${majorversion:-?}.${minorversion:-?}-${buildnumber:-?} (productversion=${productversion:-?})"
 else
   warn "/etc/VERSION not readable"
@@ -35,7 +35,7 @@ say "  euid:   $(id -u) ($(id -un 2>/dev/null || echo '?'))"
 say "== minimum version gate"
 # The SPK declares os_min_ver; a NAS older than that refuses manual install.
 if [ -r /etc/VERSION ]; then
-  . /etc/VERSION 2>/dev/null || true
+  . /etc/VERSION
   build="${buildnumber:-0}"
   if [ "${build:-0}" -lt 42661 ] 2>/dev/null; then
     warn "DSM build ${build} is older than 42661 — rebuild with SYNOTERM_OS_MIN_VER=${majorversion}.${minorversion}-${build}"

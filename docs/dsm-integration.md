@@ -152,7 +152,7 @@ Two registrations are supported. The build picks one with
 
 | Style | Files | DSM versions | `SynoToken` |
 | --- | --- | --- | --- |
-| `url` (default) | `ui/config.url` → `ui/config` | documented for 7.x, safe for the **7.1 floor** | not injected; the UI falls back to cookie-only auth |
+| `url` (default, and always used on 7.0/7.1) | `ui/config.url` → `ui/config` | documented for 7.x, safe for the **7.1 floor** | not injected; the UI extracts the token from the same-origin DSM desktop (§5.3) |
 | `vue` | `ui/config.vue` + `ui/Synoterm.js` | DSM **7.2+** desktop framework | DSM appends `?SynoToken=` to the wrapper script, which forwards it |
 
 ### 5.1 `url` style (default, 7.1-safe)
