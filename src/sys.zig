@@ -122,17 +122,23 @@ pub fn read(fd: fd_t, buf: []u8) Error!usize {
 
 pub fn writeAll(fd: fd_t, bytes: []const u8) Error!void {
     var off: usize = 0;
+    // A peer that never drains (browser tab suspended, network gone) must not
+    // hold a session thread forever: give up after ~30s of backpressure.
+    var stalls: usize = 0;
     while (off < bytes.len) {
         const rc = linux.write(fd, bytes.ptr + off, bytes.len - off);
         const err = linux.errno(rc);
         if (err == .INTR) continue;
         if (err == .AGAIN) {
+            if (stalls >= 30) return error.SyscallFailed;
+            stalls += 1;
             var pfd = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.OUT, .revents = 0 }};
             _ = linux.poll(&pfd, 1, 1000);
             continue;
         }
         if (err != .SUCCESS) return error.SyscallFailed;
         if (rc == 0) return error.SyscallFailed;
+        stalls = 0;
         off += rc;
     }
 }

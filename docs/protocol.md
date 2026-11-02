@@ -126,3 +126,6 @@ PTY is idle, which keeps DSM's nginx proxy from timing the connection out.
   nothing and relies on `TIOCSWINSZ` being cheap.
 * Additional fields in control messages must be ignored, not rejected, so that
   older frontends keep working against newer backends (and vice versa).
+* The server reads the HTTP request head and then expects to *send* the 101
+  before any WebSocket frame arrives. Clients must not pipeline frames with the
+  upgrade request (browsers do not). Pipelined bytes are discarded.
