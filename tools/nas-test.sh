@@ -118,277 +118,23 @@ SCP_OPTS=(-P "${SSH_PORT}" -o ControlMaster=auto -o ControlPath="${CONTROL_PATH}
 # home directory instead (resolved in step 2).
 REMOTE_DIR=""
 
-# ------------------------------------------------------------------ helpers --
-bold() { printf '\033[1m%s\033[0m\n' "$*"; }
-step() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
-ok() { printf '  \033[32mok\033[0m   %s\n' "$*"; }
-warn() { printf '  \033[33mwarn\033[0m %s\n' "$*"; }
-fail() { printf '  \033[31mfail\033[0m %s\n' "$*"; }
-note() { printf '       %s\n' "$*"; }
-die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
-
-redact() { # hide secrets in anything we print
-  sed -E \
-    -e 's/(id=)[A-Za-z0-9._%~-]{3,}/\1********/g' \
-    -e 's/(passwd[=:])[^ &"]*/\1********/g' \
-    -e 's/(_sid=)[^ &"]*/\1********/g' \
-    -e 's/(--token[ =]+)[^ ]*/\1********/g' \
-    -e 's/(otp_code[=:])[^ &"]*/\1********/g' \
-    -e 's/(HTTP_X_SYNO_TOKEN=)[^ ]*/\1********/g' \
-    -e 's/(Cookie: )[^"]*/\1********/g' \
-    -e 's/(--dev-token )[^ ]*/\1********/g' \
-    -e 's/([?&]t=)[^ &"]*/\1********/g'
-}
-
-trace() { # trace <command-line>; goes to stderr so command substitution stays clean
-  [ "${VERBOSE}" -eq 1 ] || return 0
-  printf '  \033[2m+ %s\033[0m\n' "$(printf '%s' "$1" | redact)" >&2
-}
-
-why() { # explain the next command
-  [ "${VERBOSE}" -eq 1 ] || return 0
-  printf '       \033[2m%s\033[0m\n' "$*" >&2
-}
-
-confirm() {
-  [ "${YES}" -eq 1 ] && return 0
-  printf '\n  \033[1m%s\033[0m [y/N] ' "$1"
-  read -r answer || return 1
-  case "${answer}" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
-}
-
-elf_machine() { # ELF e_machine of a little-endian binary (62/183/40)
-  [ -f "$1" ] || return 1
-  od -An -tu2 -j18 -N2 "$1" 2>/dev/null | tr -d ' \n'
-}
-
-expected_machine() {
-  case "$1" in
-    x86_64) echo 62 ;;
-    armv8) echo 183 ;;
-    armv7) echo 40 ;;
-  esac
-}
-
-sq() { # single-quote a string for a remote shell
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-}
-
-read_nas() { # read-only remote command, executed even in --dry-run
-  trace "ssh ${TARGET} \"$1\""
-  ssh "${SSH_OPTS[@]}" "${TARGET}" "$1"
-}
-
-on_nas() {
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    printf '  \033[2m[dry-run] ssh %s %s\033[0m\n' "${TARGET}" "$1"
-    return 0
-  fi
-  trace "ssh ${TARGET} \"$1\""
-  ssh "${SSH_OPTS[@]}" "${TARGET}" "$1"
-}
-
-on_nas_root() { # through sudo, with a TTY so the password prompt works
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    printf '  \033[2m[dry-run] ssh -t %s "sudo: %s"\033[0m\n' "${TARGET}" "$1"
-    return 0
-  fi
-  trace "ssh -t ${TARGET} \"sudo sh -c '$(sq "$1")'\""
-  ssh -t "${SSH_OPTS[@]}" "${TARGET}" "sudo sh -c '$(sq "$1")'"
-  status=$?
-  [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
-  return "${status}"
-}
-
-run_bundle() { # run_bundle "<remote command>" <local-file> [...] ; all in ONE ssh session
-  # Streams the files as a tar over stdin and runs the command in the same
-  # session, so nothing depends on files being visible to a *later* ssh/scp
-  # session (DSM's sftp subsystem and PrivateTmp can differ).
-  local remote_cmd="$1"; shift
-  local staging
-  staging="$(mktemp -d)" || return 1
-  local names=()
-  local spec src name
-  for spec in "$@"; do
-    case "${spec}" in
-      *:*) src="${spec%%:*}"; name="${spec#*:}" ;;
-      *)   src="${spec}"; name="$(basename "${spec}")" ;;
-    esac
-    cp "${src}" "${staging}/${name}" || { rm -rf "${staging}"; return 1; }
-    names+=("${name}")
-  done
-  trace "tar -cf - ${names[*]} | ssh ${TARGET} 'cd \$(mktemp -d) && tar -xf - && ${remote_cmd}'"
-  tar -cf - -C "${staging}" "${names[@]}" | ssh "${SSH_OPTS[@]}" "${TARGET}" \
-    "d=\$(mktemp -d) && cd \"\$d\" && tar -xf - && chmod 700 . 2>/dev/null; ${remote_cmd}; rc=\$?; cd /; rm -rf \"\$d\"; exit \$rc"
-  local status=$?
-  rm -rf "${staging}"
-  [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
-  return "${status}"
-}
-
-copy_to_nas() { # <local-file> <remote-absolute-path>
-  # Uses the SSH exec channel (`cat > file`) instead of scp/sftp: DSM's sftp
-  # subsystem can live in a different mount/session view than the login shell,
-  # which is exactly the "scp: dest open: No such file or directory" failure
-  # seen on real NASes. mkdir, write and rename all happen in one session.
-  local local_file="$1" remote_path="$2" remote_dir
-  remote_dir="$(dirname "${remote_path}")"
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    printf '  \033[2m[dry-run] stream %s -> %s:%s\033[0m\n' "${local_file}" "${NAS}" "${remote_path}"
-    return 0
-  fi
-  trace "ssh ${TARGET} \"cat > ${remote_path}\" < ${local_file}"
-  ssh "${SSH_OPTS[@]}" "${TARGET}" \
-    "mkdir -p '${remote_dir}' && cat > '${remote_path}.part' && mv -f '${remote_path}.part' '${remote_path}'" \
-    <"${local_file}"
-  status=$?
-  [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
-  return "${status}"
-}
-
-copy_tree_to_nas() { # <local-dir> <remote-dir>
-  local local_dir="$1" remote_dir="$2"
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    printf '  \033[2m[dry-run] stream %s/ -> %s:%s\033[0m\n' "${local_dir}" "${NAS}" "${remote_dir}"
-    return 0
-  fi
-  trace "tar -czf - -C ${local_dir} . | ssh ${TARGET} \"tar -xzf - -C ${remote_dir}\""
-  ( cd "${local_dir}" && tar -czf - . ) | ssh "${SSH_OPTS[@]}" "${TARGET}" \
-    "mkdir -p '${remote_dir}' && tar -xzf - -C '${remote_dir}'"
-  status=$?
-  [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
-  return "${status}"
-}
-
-cleanup() {
-  if [ "${LOGGED_IN:-0}" -eq 1 ] && [ "${DSM_LOGGED_OUT:-0}" -eq 0 ] && [ "${DRY_RUN}" -eq 0 ] && [ -n "${DSM_SID:-}" ]; then
-    printf '%s\n' "url = \"https://${NAS}:${DSM_PORT}/webapi/auth.cgi\"
-data-urlencode = \"api=SYNO.API.Auth\"
-data-urlencode = \"version=6\"
-data-urlencode = \"method=logout\"
-data-urlencode = \"session=Synoterm\"
-data-urlencode = \"_sid=${DSM_SID}\"" | curl -sS -k --max-time 8 --config - >/dev/null 2>&1 || true
-  fi
-  if [ -n "${LOG_FILE}" ] && [ -f "${LOG_FILE}" ]; then
-    esc=$(printf '\033')
-    # strip ANSI, then mask the dev secret that the on-screen URL shows
-    sed -e "s/${esc}\[[0-9;]*m//g" -e 's/\([?&]t=\)[A-Za-z0-9._-]*/\1********/g' \
-      "${LOG_FILE}" > "${LOG_FILE}.tmp" 2>/dev/null \
-      && mv "${LOG_FILE}.tmp" "${LOG_FILE}" || rm -f "${LOG_FILE}.tmp"
-  fi
-  [ "${DRY_RUN}" -eq 1 ] && return 0
-  [ -n "${REMOTE_DIR}" ] && on_nas "rm -rf '${REMOTE_DIR}'" >/dev/null 2>&1 || true
-  ssh "${SSH_OPTS[@]}" -O exit "${TARGET}" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-mkdir -p "${ROOT}/build"
-
-if [ "${TRACE}" -eq 1 ]; then
-  PS4='  \033[2m[trace] +${LINENO}: \033[0m'
-  set -x
-fi
-
-if [ -n "${LOG_FILE}" ]; then
-  mkdir -p "$(dirname "${LOG_FILE}")"
-  exec > >(tee -a "${LOG_FILE}") 2>&1
-  {
-    printf '\n===== synoterm nas-test %s =====\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    printf 'args: %s\n' "$(printf '%s ' "$0" "${ORIGINAL_ARGS[@]}" | redact)"
-    printf 'this machine: %s\n' "$(uname -sm 2>/dev/null)"
-  } >>"${LOG_FILE}"
-  note "transcript (secrets redacted): ${LOG_FILE}"
-fi
+# Shared plumbing (logging, ssh streaming, DSM login, install/verify helpers).
+# shellcheck source=lib/nas-common.sh
+. "${ROOT}/tools/lib/nas-common.sh"
+ARCH_OVERRIDE="${ASSUME_ARCH}"
+nas_init "nas-test"
 
 # --------------------------------------------------------------- 1. detect --
 step "1/6  detect DSM version and architecture"
 why "Read-only SSH calls: uname, /etc/VERSION and the Synology model id."
 why "The model id + arch decide which .spk to build; the build number decides"
 why "whether os_min_ver has to be lowered for an older DSM 7.1 build."
-UN="$(read_nas 'uname -m' 2>/dev/null | tr -d '\r')" || die "cannot reach ${TARGET} over SSH"
-[ -n "${UN}" ] || die "could not read the architecture from ${NAS}"
-VERSION_LINE="$(read_nas '. /etc/VERSION 2>/dev/null; echo "${productversion:-?} build ${buildnumber:-?}"' | tr -d '\r')"
-[ -n "${VERSION_LINE}" ] || VERSION_LINE="unknown (no /etc/VERSION)"
-MODEL="$(read_nas 'cat /proc/sys/kernel/syno_hw_version 2>/dev/null' | tr -d '\r')"
-DSM_BUILD="$(read_nas '. /etc/VERSION 2>/dev/null; echo "${buildnumber:-0}"' | tr -d '\r')"
-DSM_MAJOR="$(read_nas '. /etc/VERSION 2>/dev/null; echo "${majorversion:-7}.${minorversion:-1}"' | tr -d '\r')"
-
-case "${ASSUME_ARCH:-${UN}}" in
-  x86_64|amd64) ARCH=x86_64; ZIG_TARGET="x86_64-linux-musl" ;;
-  aarch64|armv8l|arm64) ARCH=armv8; ZIG_TARGET="aarch64-linux-musl" ;;
-  armv7l|armv7) ARCH=armv7; ZIG_TARGET="arm-linux-musleabihf" ;;
-  *) die "unsupported architecture '${UN}'" ;;
-esac
-ok "nas:   ${NAS} (model ${MODEL:-unknown})"
-ok "dsm:   ${VERSION_LINE}"
-ok "arch:  ${UN} -> spk arch '${ARCH}'"
-
-OS_MIN_VER="7.1-42661"
-case "${DSM_BUILD}" in
-  ''|*[!0-9]*) warn "could not read the DSM build number; assuming os_min_ver=${OS_MIN_VER}" ;;
-  *)
-    if [ "${DSM_BUILD}" -lt 42661 ]; then
-      OS_MIN_VER="${DSM_MAJOR}-${DSM_BUILD}"
-      warn "DSM build ${DSM_BUILD} is older than 42661 — building with os_min_ver=${OS_MIN_VER}"
-    else
-      ok "DSM build ${DSM_BUILD} satisfies os_min_ver=${OS_MIN_VER}"
-    fi
-    ;;
-esac
+nas_detect
 
 # ------------------------------------------------------------ 2. preflight --
 step "2/6  preflight (read-only)"
-REMOTE_HOME="$(read_nas 'printf %s "$HOME"')"
-if [ -z "${REMOTE_HOME}" ]; then
-  die "could not read \$HOME on the NAS"
-fi
-why "Remote \$HOME: ${REMOTE_HOME}"
-why "Work dir goes there (not /tmp: DSM's sshd may use PrivateTmp, and scp/sftp"
-why "may see a different view than the login shell)."
+nas_ensure_workdir
 
-REMOTE_HOME_REAL="$(read_nas 'readlink -f "$HOME" 2>/dev/null' || true)"
-if [ -n "${REMOTE_DIR_ARG}" ]; then
-  candidates="${REMOTE_DIR_ARG}"
-else
-  candidates="${REMOTE_HOME}/.synoterm-test"
-  if [ -n "${REMOTE_HOME_REAL}" ] && [ "${REMOTE_HOME_REAL}" != "${REMOTE_HOME}" ]; then
-    why "\$HOME is a symlink: ${REMOTE_HOME} -> ${REMOTE_HOME_REAL}"
-    candidates="${candidates}
-${REMOTE_HOME_REAL}/.synoterm-test"
-  fi
-  candidates="${candidates}
-${REMOTE_HOME}
-${REMOTE_HOME}/synoterm-test"
-fi
-
-REMOTE_DIR=""
-for candidate in ${candidates}; do
-  if on_nas "mkdir -p '${candidate}' 2>/dev/null && : > '${candidate}/.write-test' 2>/dev/null && rm -f '${candidate}/.write-test' 2>/dev/null"; then
-    REMOTE_DIR="${candidate}"
-    break
-  fi
-done
-
-if [ -z "${REMOTE_DIR}" ]; then
-  fail "no writable directory on the NAS"
-  on_nas 'echo "  id:   $(id)"; echo "  HOME: ${HOME}"; ls -ld "${HOME}" 2>&1 | sed "s/^/  ls:   /"; df -h "${HOME}" 2>&1 | sed "s/^/  df:   /"'
-  die "tried:
-    ${candidates}
-  Use --remote-dir <path> to pick one yourself (it must be writable by ${SSH_USER})."
-fi
-ok "work dir: ${REMOTE_DIR}"
-
-# The preflight is streamed and executed inside a single ssh session, so it
-# cannot be affected by per-session /tmp or sftp-view differences.
-if [ "${DRY_RUN}" -eq 1 ]; then
-  note "[dry-run] would stream nas-preflight.sh and run it on the NAS"
-else
-  run_bundle "sh ./nas-preflight.sh" "${ROOT}/tools/nas-preflight.sh" 2>&1 | sed 's/^/  /'
-  PREFLIGHT_STATUS=${PIPESTATUS[0]}
-  [ "${PREFLIGHT_STATUS}" -eq 0 ] || warn "preflight reported problems (see FAIL lines above)"
-fi
-
-# Cross-session visibility check: this is the thing that broke 'scp' on DSM.
 if [ "${DRY_RUN}" -eq 0 ]; then
   copy_to_nas "${ROOT}/tools/nas-auth-test.sh" "${REMOTE_DIR}/nas-auth-test.sh" \
     || die "cannot write to ${REMOTE_DIR} — check that ${REMOTE_HOME} is writable by ${SSH_USER}"
@@ -734,7 +480,10 @@ else
       read -r _ || true
       kill "${SERVER_SSH_PID}" 2>/dev/null || true
       wait "${SERVER_SSH_PID}" 2>/dev/null || true
-      on_nas "pkill -f '${REMOTE_DIR}/synoterm' 2>/dev/null; echo '  dev server stopped'"
+      if [ -n "${SMOKE_PID:-}" ]; then
+        on_nas "kill ${SMOKE_PID} 2>/dev/null; sleep 1; kill -9 ${SMOKE_PID} 2>/dev/null" >/dev/null 2>&1 || true
+      fi
+      note "dev server stopped"
       if [ -f "${SMOKE_LOG}" ]; then
         cp "${SMOKE_LOG}" "${ROOT}/build/smoke-server.log" 2>/dev/null || true
       fi
@@ -863,7 +612,7 @@ else
 fi
 
 step "summary"
-ok "nas:        ${NAS} (${MODEL:-unknown model}, ${UN})"
+ok "nas:        ${NAS} (${MODEL:-unknown model}, ${NAS_UNAME})"
 ok "dsm:        ${VERSION_LINE}"
 ok "package:    synoterm ${SPK_VERSION} for ${ARCH} (ui style ${UI_STYLE}, os_min_ver ${OS_MIN_VER})"
 case "${COOKIE_ONLY_OK}" in

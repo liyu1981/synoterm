@@ -115,10 +115,28 @@ src/                     Zig backend
 frontend/                xterm.js UI (esbuild bundle, no framework)
 packaging/dsm7/          DSM 7 package skeleton (INFO, conf, nginx, ui, scripts)
 tools/                   build-spk.sh, verify-spk.sh, make-icons.py, dev.sh,
-                         e2e.mjs, ws-test.mjs, nas-test.sh (interactive NAS run),
-                         nas-preflight.sh, nas-auth-test.sh, nas-uninstall.sh
+                         e2e.mjs, ws-test.mjs,
+                         nas-install.sh (install on a NAS),
+                         nas-test.sh (full checklist run),
+                         nas-preflight.sh, nas-auth-test.sh, nas-uninstall.sh,
+                         lib/nas-common.sh (shared SSH/DSM plumbing)
 docs/                    plan, architecture, DSM integration, protocol, libghostty-vt
 ```
+
+## Installing on a NAS
+
+```sh
+tools/nas-install.sh 192.168.0.18 --user yli            # asks for DSM password
+tools/nas-install.sh 192.168.0.18 --user yli --dry-run  # plan only
+tools/nas-install.sh 192.168.0.18 --uninstall           # remove it again
+```
+
+Detects DSM version/arch, runs the read-only preflight, builds a static-musl
+`.spk` with an increasing build number, installs it through `synopkg` (sudo),
+then verifies: `synopkg status`, the setuid tool mode, the nginx mount,
+`/synoterm/healthz`, and an end-to-end terminal over `wss://` with your real DSM
+session. Your DSM password is only used to obtain a session (and log it out
+again); it never appears in argv, processes or the transcript.
 
 ## Testing on a real NAS
 

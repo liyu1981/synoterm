@@ -382,12 +382,16 @@ DSM 7 verifies package signatures by default. For an unsigned build:
 
 ## 10. Testing on a real (production) NAS
 
-Yes — a real DSM 7.1 box is the best test target. The whole sequence below is
-automated, interactively, by:
+Yes — a real DSM 7.1 box is the best test target. Two scripts automate it:
 
 ```sh
-tools/nas-test.sh nas.local
+tools/nas-install.sh nas.local --user <you>   # install + verify only
+tools/nas-test.sh nas.local --user <you>      # full checklist (preflight, auth
+                                              # probe, LAN smoke test, install)
 ```
+
+Both are interactive, print every command (secrets redacted), and stop before
+anything is changed. The rest of this section describes what they do.
 
 It prints every remote command as `+ …` (passwords, cookies and tokens are
 redacted), explains in one or two lines what each step is for, stops before the
