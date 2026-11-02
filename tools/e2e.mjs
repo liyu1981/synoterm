@@ -141,11 +141,39 @@ try {
   const tabs = await page.evaluate(() => document.querySelectorAll("#tabs .tab").length);
   if (tabs !== 2) failures.push(`expected 2 tabs, saw ${tabs}`);
 
+  // Regression guard: xterm.js's own stylesheet must be loaded, otherwise its
+  // helper elements stay visible and paint stray rows of characters (the
+  // "$$$$$$$$" / "----4444" artifact seen on a real NAS).
+  const xtermStyles = await page.evaluate(() => {
+    const pane = document.querySelector(".terminal-pane.active");
+    const helper = pane.querySelector(".xterm-helper-textarea");
+    const cache = pane.querySelector(".xterm-width-cache-measure-container");
+    const cacheRect = cache ? cache.getBoundingClientRect() : null;
+    return {
+      helperOpacity: helper ? getComputedStyle(helper).opacity : "missing",
+      cachePainted: !!(cacheRect && cacheRect.width > 0 && cacheRect.height > 0),
+    };
+  });
+  if (xtermStyles.helperOpacity !== "0") {
+    failures.push(`xterm.css missing? helper textarea opacity=${xtermStyles.helperOpacity} (expected 0)`);
+  }
+  if (xtermStyles.cachePainted) {
+    failures.push("xterm width-cache measure container is painted over the screen (missing xterm.css)");
+  }
+
   const size = await page.evaluate(() => {
     const s = window.synoterm.active;
     return { cols: s.term.cols, rows: s.term.rows };
   });
   if (size.cols < 20 || size.rows < 5) failures.push(`unexpected terminal size ${JSON.stringify(size)}`);
+
+  // Optional slow check (SYNOTERM_E2E_SLOW=1): a session must survive idling
+  // longer than the HTTP header timeout (30s).
+  if (process.env.SYNOTERM_E2E_SLOW === "1") {
+    await page.waitForTimeout(35000);
+    const idleStatus = await page.textContent("#status-text");
+    if (!/connected/.test(idleStatus)) failures.push(`session dropped while idle: "${idleStatus}"`);
+  }
 } catch (error) {
   failures.push(String(error));
 } finally {

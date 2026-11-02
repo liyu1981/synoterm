@@ -92,12 +92,26 @@ Ordering that matters:
 
 ## 4. Frontend
 
+Two hard-won rules, each guarding against a bug seen on a real NAS:
+
+* **Load `@xterm/xterm/css/xterm.css`.** xterm's helper elements (font-width
+  measurement container, hidden textarea, accessibility layer) rely on it. Without
+  it they are painted, producing a stray row of repeated characters (e.g.
+  `$$$$$$$$$$` or `----4444`) above the prompt.
+* **Open the terminal only in a visible, laid-out pane**, and re-`fit()` after
+  `document.fonts.ready`; xterm measures the character cell from the container at
+  `open()`/`resize()` time.
+
+
 * Bundled by esbuild into `frontend/dist/app.js` (~350 KB, no framework, no CDN
   — the NAS may be offline).
 * `Terminal` per tab, `FitAddon` for sizing, `WebLinksAddon` for clickable URLs.
 * Keystrokes go out as **binary** frames (xterm.js `onData` → `TextEncoder`);
   control messages (`resize`, `close`) are **text** frames with JSON.
-* Reconnect with exponential backoff (0.5 s → 8 s). With M3 the reattach
+* Reconnect with exponential backoff (0.5 s → 8 s), and only when the socket
+  really dropped: the backend clears `SO_RCVTIMEO` after the upgrade, because an
+  interactive session is idle for minutes and a 30 s receive timeout silently
+  killed it (visible as "disconnected, retrying in 1 s" after a pause). With M3 the reattach
   includes the VT snapshot, so the user lands exactly where they left off.
 * The stylesheet is imported as text and injected by the bundle, so a DSM
   upgrade cannot leave a stale `<link>` behind (a real bug in similar packages).

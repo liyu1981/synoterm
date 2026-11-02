@@ -1,6 +1,10 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+// xterm.js ships layout styles that are *required*: without them its helper
+// elements (font-width measurement container, textarea, accessibility layer)
+// stay visible and paint stray rows of characters over the screen.
+import xtermCss from "@xterm/xterm/css/xterm.css";
 import cssText from "./style.css";
 
 /**
@@ -120,21 +124,25 @@ function devToken() {
 }
 
 class Session {
-  constructor(manager, name) {
+  /**
+   * `pane` must already be in the document *and visible*: xterm measures the
+   * character cell from the container, and opening it in a `display:none` pane
+   * makes it cache a bogus width (rows then render as a run of one glyph).
+   */
+  constructor(manager, pane, name) {
     this.manager = manager;
     this.name = name;
     this.state = "connecting";
     this.attempts = 0;
     this.closedByUser = false;
 
-    this.pane = document.createElement("div");
-    this.pane.className = "terminal-pane";
+    this.pane = pane;
 
     this.term = new Terminal(TERM_OPTIONS);
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     this.term.loadAddon(new WebLinksAddon());
-    this.term.open(this.pane);
+    this.term.open(pane);
     this.term.onData((data) => this.sendInput(data));
     this.term.onResize(({ cols, rows }) => this.sendControl({ type: "resize", cols, rows }));
 
@@ -241,8 +249,12 @@ class Session {
 
   refit() {
     if (!this.pane.classList.contains("active")) return;
+    if (this.pane.clientWidth === 0 || this.pane.clientHeight === 0) return;
     try {
       this.fit.fit();
+      // Repaint everything: after a resize the DOM renderer can keep stale
+      // glyph runs otherwise.
+      this.term.refresh(0, this.term.rows - 1);
     } catch {
       /* the pane may not be laid out yet */
     }
@@ -300,11 +312,21 @@ class TabManager {
 
   newTab() {
     this.counter += 1;
-    const session = new Session(this, `terminal ${this.counter}`);
+    const pane = document.createElement("div");
+    pane.className = "terminal-pane active";
+    this.host.appendChild(pane);
+
+    // Only one pane may be active, and the new one must have layout before
+    // xterm.js measures the font.
+    if (this.active) this.active.deactivate();
+    else for (const other of this.tabs) other.deactivate();
+
+    const session = new Session(this, pane, `terminal ${this.counter}`);
     this.tabs.push(session);
-    this.host.appendChild(session.element);
+    this.active = session;
     this.renderTabs();
-    this.select(session);
+    this.updateStatus();
+    session.activate();
     session.connect();
     return session;
   }
@@ -394,15 +416,34 @@ class TabManager {
   }
 }
 
-function boot() {
+async function boot() {
   const style = document.createElement("style");
-  style.textContent = cssText;
+  // Base stylesheet first, our theme last so it can override.
+  style.textContent = `${xtermCss}\n${cssText}`;
   document.head.appendChild(style);
 
   const manager = new TabManager(document.getElementById("terminal-host"));
   window.synoterm = manager;
+
+  // xterm measures its cell size from the rendered font; do it once fonts are
+  // settled, otherwise rows can render with the wrong advance width.
+  if (document.fonts && document.fonts.ready) {
+    try {
+      await document.fonts.ready;
+    } catch {
+      /* ignore */
+    }
+  }
   manager.newTab();
-  window.addEventListener("resize", () => manager.active?.refit());
+  if (document.fonts) {
+    document.fonts.addEventListener("loadingdone", () => manager.active?.refit());
+  }
+
+  let resizeTimer;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => manager.active?.refit(), 80);
+  });
 }
 
 if (document.readyState === "loading") {

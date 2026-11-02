@@ -293,6 +293,15 @@ pub fn setRecvTimeout(fd: fd_t, seconds: u32) void {
     _ = linux.setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, @ptrCast(&tv), @sizeOf(linux.timeval));
 }
 
+/// 0 disables the timeout (block until data or a real error).
+pub fn clearRecvTimeout(fd: fd_t) void {
+    setRecvTimeout(fd, 0);
+}
+
+pub fn clearSendTimeout(fd: fd_t) void {
+    setSendTimeout(fd, 0);
+}
+
 pub fn setSendTimeout(fd: fd_t, seconds: u32) void {
     const tv = linux.timeval{ .sec = @intCast(seconds), .usec = 0 };
     _ = linux.setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, @ptrCast(&tv), @sizeOf(linux.timeval));

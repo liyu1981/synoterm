@@ -415,6 +415,11 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
     response.appendSlice("\r\n") catch return;
     sys.writeAll(fd, response.items()) catch return;
 
+    // The receive timeout above only exists to bound the HTTP header read.
+    // An interactive terminal is idle for minutes at a time: keeping the
+    // timeout would silently kill the session after N seconds of no input.
+    sys.clearRecvTimeout(fd);
+
     // --- 6. spawn the shell and bridge ---
     var link = Link{ .fd = fd };
 
@@ -448,8 +453,8 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
     // pty -> browser
     const pump_thread = std.Thread.spawn(.{}, pumpFn, .{ session_ptr, &link }) catch null;
 
-    // browser -> pty
-    bridgeInput(allocator, session_ptr, &link);
+    // browser -> pty (frames allocate/free per message, so no arena)
+    bridgeInput(std.heap.smp_allocator, session_ptr, &link);
 
     // Closing the master while the pump is still blocked in read() would race
     // with the pump; signal the shell instead and let the pump see EOF.
@@ -469,6 +474,8 @@ fn pumpFn(session_ptr: *pty_session.Session, link: *Link) void {
 
 fn bridgeInput(allocator: std.mem.Allocator, session_ptr: *pty_session.Session, link: *Link) void {
     while (true) {
+        // Per-message buffers use a real allocator: the connection arena is
+        // never freed, so keystrokes would otherwise leak for the session's life.
         const frame = ws.readMessage(allocator, link.fd) catch return;
         defer allocator.free(frame.payload);
 

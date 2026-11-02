@@ -531,6 +531,9 @@ the exact response body of a rejected upgrade.
 
   If you need it detached, use DSM's Task Scheduler ("Run command" as your
   user) rather than `nohup` over ssh.
+* Stray rows of repeated characters in the terminal (e.g. `$$$$$$$` or `----4444`)
+  mean xterm.js's stylesheet is missing from the bundle — it hides the font
+  width-measurement container. `tools/e2e.mjs` asserts this now.
 * `connection refused` vs `timeout` when testing from the LAN tells you which
   problem you have: *refused* = nothing listening (the process died), *timeout*
   = DSM's firewall (Control Panel → Security → Firewall) is dropping the port.
