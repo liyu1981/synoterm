@@ -15,4 +15,3 @@ frontend/dist/
 
 # Root tooling
 node_modules/
-package-lock.json
