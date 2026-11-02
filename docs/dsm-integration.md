@@ -415,11 +415,19 @@ Outcome decides the UI style:
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `scp: dest open "…/tmp/synoterm-test/…": No such file or directory` right after a successful `mkdir` | DSM's sshd uses **PrivateTmp**: every `ssh`/`scp` sees a different `/tmp` | use the home directory — `nas-test.sh` does this automatically (`$HOME/.synoterm-test`) |
+| `scp: dest open "…": No such file or directory` right after a successful `mkdir` | the sftp/scp subsystem sees a different filesystem view than the login shell (PrivateTmp and friends) | `nas-test.sh` no longer uses scp: files are streamed over the SSH exec channel (`cat > file`) and the probes run inside one session. If the cross-session check still fails, use `--remote-dir <path on a normal volume>` |
+| write test says "files written now are not visible to a later ssh session" | per-session mount view on this NAS | run the diagnostic the script prints, then `--remote-dir /volume1/homes/<user>/.synoterm-test` |
 | password asked on every command | no SSH connection reuse | `nas-test.sh` sets `ControlMaster`/`ControlPersist`; one prompt per run |
 | `cannot create … on the NAS` | `$HOME` is `/` or not writable (user home service disabled) | Control Panel → User & Group → Advanced → enable User Home, or `--user root` |
 | probe says `cookie only -> <empty>` | DSM needs the `SynoToken` for this build | `--ui-style vue` (7.2) or the ExtJS wrapper (§5.3) |
 | terminal answers **403** | account not in `administrators` | add the account to that group, or set `REQUIRE_GROUP=""` in `$SYNOPKG_PKGVAR/etc/synoterm.conf` and restart the package |
+
+Two-line diagnostic if file copies misbehave (run from this machine):
+
+```sh
+ssh <user>@<nas> 'd="$HOME/.synoterm-test"; mkdir -p "$d" && echo hi > "$d/t" && ls -l "$d/t"'
+ssh <user>@<nas> 'ls -l "$HOME/.synoterm-test/t"'      # ENOENT => per-session view
+```
 
 The service config lives in `$SYNOPKG_PKGVAR/etc/synoterm.conf` (created by
 `postinst`, never overwritten on upgrade):

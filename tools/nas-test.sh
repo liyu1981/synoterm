@@ -17,7 +17,7 @@
 #   5  install the .spk and verify end to end   (changes DSM; asks first)
 #   6  optional uninstall
 #
-# Needs on this machine: ssh, scp, curl, node (for the WebSocket probe).
+# Needs on this machine: ssh, curl, node (for the WebSocket probe), tar.
 # zig + npm are only used if a binary/package has to be built.
 set -uo pipefail
 
@@ -37,6 +37,7 @@ SKIP_AUTH=0
 UNINSTALL=0
 COOKIE_ARG=""
 FORCE_UI_STYLE=""
+REMOTE_DIR_ARG=""
 COOKIE_ONLY_OK="unknown"
 PROBED=0
 DSM_LOGGED_OUT=0
@@ -61,6 +62,7 @@ Options:
   --uninstall         uninstall at the end (otherwise step 6 is skipped)
   --cookie '<header>' use a Cookie header instead of logging in
   --ui-style url|vue  force the package flavour instead of probing
+  --remote-dir <path> directory on the NAS for temporary files (default: $HOME/.synoterm-test)
   --yes               do not ask before the smoke test / install (never uninstalls)
   --quiet             do not print the commands being run
   --trace             also trace inside bash (set -x) and remote scripts (sh -x)
@@ -85,6 +87,7 @@ while [ $# -gt 0 ]; do
     --log) LOG_FILE="${2:?}"; shift 2 ;;
     --cookie) COOKIE_ARG="${2:?}"; shift 2 ;;
     --ui-style) FORCE_UI_STYLE="${2:?}"; shift 2 ;;
+    --remote-dir) REMOTE_DIR_ARG="${2:?}"; shift 2 ;;
     --yes|-y) YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -188,13 +191,61 @@ on_nas_root() { # through sudo, with a TTY so the password prompt works
   return "${status}"
 }
 
-copy_to_nas() {
+run_bundle() { # run_bundle "<remote command>" <local-file> [...] ; all in ONE ssh session
+  # Streams the files as a tar over stdin and runs the command in the same
+  # session, so nothing depends on files being visible to a *later* ssh/scp
+  # session (DSM's sftp subsystem and PrivateTmp can differ).
+  local remote_cmd="$1"; shift
+  local staging
+  staging="$(mktemp -d)" || return 1
+  local names=()
+  local spec src name
+  for spec in "$@"; do
+    case "${spec}" in
+      *:*) src="${spec%%:*}"; name="${spec#*:}" ;;
+      *)   src="${spec}"; name="$(basename "${spec}")" ;;
+    esac
+    cp "${src}" "${staging}/${name}" || { rm -rf "${staging}"; return 1; }
+    names+=("${name}")
+  done
+  trace "tar -cf - ${names[*]} | ssh ${TARGET} 'cd \$(mktemp -d) && tar -xf - && ${remote_cmd}'"
+  tar -cf - -C "${staging}" "${names[@]}" | ssh "${SSH_OPTS[@]}" "${TARGET}" \
+    "d=\$(mktemp -d) && cd \"\$d\" && tar -xf - && chmod 700 . 2>/dev/null; ${remote_cmd}; rc=\$?; cd /; rm -rf \"\$d\"; exit \$rc"
+  local status=$?
+  rm -rf "${staging}"
+  [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
+  return "${status}"
+}
+
+copy_to_nas() { # <local-file> <remote-absolute-path>
+  # Uses the SSH exec channel (`cat > file`) instead of scp/sftp: DSM's sftp
+  # subsystem can live in a different mount/session view than the login shell,
+  # which is exactly the "scp: dest open: No such file or directory" failure
+  # seen on real NASes. mkdir, write and rename all happen in one session.
+  local local_file="$1" remote_path="$2" remote_dir
+  remote_dir="$(dirname "${remote_path}")"
   if [ "${DRY_RUN}" -eq 1 ]; then
-    printf '  \033[2m[dry-run] scp %s -> %s:%s\033[0m\n' "$1" "${NAS}" "$2"
+    printf '  \033[2m[dry-run] stream %s -> %s:%s\033[0m\n' "${local_file}" "${NAS}" "${remote_path}"
     return 0
   fi
-  trace "scp ${1} ${TARGET}:${2}"
-  scp "${SCP_OPTS[@]}" -q "$1" "${TARGET}:$2"
+  trace "ssh ${TARGET} \"cat > ${remote_path}\" < ${local_file}"
+  ssh "${SSH_OPTS[@]}" "${TARGET}" \
+    "mkdir -p '${remote_dir}' && cat > '${remote_path}.part' && mv -f '${remote_path}.part' '${remote_path}'" \
+    <"${local_file}"
+  status=$?
+  [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
+  return "${status}"
+}
+
+copy_tree_to_nas() { # <local-dir> <remote-dir>
+  local local_dir="$1" remote_dir="$2"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf '  \033[2m[dry-run] stream %s/ -> %s:%s\033[0m\n' "${local_dir}" "${NAS}" "${remote_dir}"
+    return 0
+  fi
+  trace "tar -czf - -C ${local_dir} . | ssh ${TARGET} \"tar -xzf - -C ${remote_dir}\""
+  ( cd "${local_dir}" && tar -czf - . ) | ssh "${SSH_OPTS[@]}" "${TARGET}" \
+    "mkdir -p '${remote_dir}' && tar -xzf - -C '${remote_dir}'"
   status=$?
   [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
   return "${status}"
@@ -280,35 +331,68 @@ REMOTE_HOME="$(read_nas 'printf %s "$HOME"')"
 if [ -z "${REMOTE_HOME}" ]; then
   die "could not read \$HOME on the NAS"
 fi
-REMOTE_DIR="${REMOTE_HOME}/.synoterm-test"
-why "Work dir: ${REMOTE_DIR} (not /tmp: DSM's sshd uses PrivateTmp, so /tmp is"
-why "per-connection and scp would not see files created by a previous ssh)."
-why "It only reads: /etc/VERSION, binaries, /etc/nginx, netstat, /var/packages."
+why "Remote \$HOME: ${REMOTE_HOME}"
+why "Work dir goes there (not /tmp: DSM's sshd may use PrivateTmp, and scp/sftp"
+why "may see a different view than the login shell)."
 
-on_nas "mkdir -p '${REMOTE_DIR}' && chmod 700 '${REMOTE_DIR}'" || die "cannot create ${REMOTE_DIR} on the NAS
-  hint: if \$HOME is '/' or not writable, enable DSM's user home service
-        (Control Panel → User & Group → Advanced → User Home) or run over
-        'ssh root@nas' instead."
-copy_to_nas "${ROOT}/tools/nas-preflight.sh" "${REMOTE_DIR}/nas-preflight.sh" \
-  || die "scp to ${REMOTE_DIR} failed — check that ${REMOTE_HOME} is writable by ${SSH_USER}"
-copy_to_nas "${ROOT}/tools/nas-auth-test.sh" "${REMOTE_DIR}/nas-auth-test.sh" \
-  || die "scp to ${REMOTE_DIR} failed"
-on_nas "chmod 700 '${REMOTE_DIR}/nas-preflight.sh' '${REMOTE_DIR}/nas-auth-test.sh'"
-
-# Diagnostic for the /tmp surprise: DSM sshd commonly runs with PrivateTmp.
-if [ "${DRY_RUN}" -eq 0 ]; then
-  if read_nas 'touch /tmp/.synoterm-probe 2>/dev/null' 2>/dev/null \
-     && read_nas 'test -f /tmp/.synoterm-probe' 2>/dev/null; then
-    ok "/tmp is shared between ssh sessions"
-    read_nas 'rm -f /tmp/.synoterm-probe' >/dev/null 2>&1 || true
-  else
-    warn "/tmp is private per ssh session (DSM PrivateTmp) — using ${REMOTE_DIR} instead"
-  fi
-fi
-if [ "${DRY_RUN}" -eq 1 ]; then
-  note "[dry-run] would run ${REMOTE_DIR}/nas-preflight.sh on the NAS"
+REMOTE_HOME_REAL="$(read_nas 'readlink -f "$HOME" 2>/dev/null' || true)"
+if [ -n "${REMOTE_DIR_ARG}" ]; then
+  candidates="${REMOTE_DIR_ARG}"
 else
-  ssh "${SSH_OPTS[@]}" "${TARGET}" "sh '${REMOTE_DIR}/nas-preflight.sh'" 2>&1 | sed 's/^/  /'
+  candidates="${REMOTE_HOME}/.synoterm-test"
+  if [ -n "${REMOTE_HOME_REAL}" ] && [ "${REMOTE_HOME_REAL}" != "${REMOTE_HOME}" ]; then
+    why "\$HOME is a symlink: ${REMOTE_HOME} -> ${REMOTE_HOME_REAL}"
+    candidates="${candidates}
+${REMOTE_HOME_REAL}/.synoterm-test"
+  fi
+  candidates="${candidates}
+${REMOTE_HOME}
+${REMOTE_HOME}/synoterm-test"
+fi
+
+REMOTE_DIR=""
+for candidate in ${candidates}; do
+  if on_nas "mkdir -p '${candidate}' 2>/dev/null && : > '${candidate}/.write-test' 2>/dev/null && rm -f '${candidate}/.write-test' 2>/dev/null"; then
+    REMOTE_DIR="${candidate}"
+    break
+  fi
+done
+
+if [ -z "${REMOTE_DIR}" ]; then
+  fail "no writable directory on the NAS"
+  on_nas 'echo "  id:   $(id)"; echo "  HOME: ${HOME}"; ls -ld "${HOME}" 2>&1 | sed "s/^/  ls:   /"; df -h "${HOME}" 2>&1 | sed "s/^/  df:   /"'
+  die "tried:
+    ${candidates}
+  Use --remote-dir <path> to pick one yourself (it must be writable by ${SSH_USER})."
+fi
+ok "work dir: ${REMOTE_DIR}"
+
+# The preflight is streamed and executed inside a single ssh session, so it
+# cannot be affected by per-session /tmp or sftp-view differences.
+if [ "${DRY_RUN}" -eq 1 ]; then
+  note "[dry-run] would stream nas-preflight.sh and run it on the NAS"
+else
+  run_bundle "sh ./nas-preflight.sh" "${ROOT}/tools/nas-preflight.sh" 2>&1 | sed 's/^/  /'
+  PREFLIGHT_STATUS=${PIPESTATUS[0]}
+  [ "${PREFLIGHT_STATUS}" -eq 0 ] || warn "preflight reported problems (see FAIL lines above)"
+fi
+
+# Cross-session visibility check: this is the thing that broke 'scp' on DSM.
+if [ "${DRY_RUN}" -eq 0 ]; then
+  copy_to_nas "${ROOT}/tools/nas-auth-test.sh" "${REMOTE_DIR}/nas-auth-test.sh" \
+    || die "cannot write to ${REMOTE_DIR} — check that ${REMOTE_HOME} is writable by ${SSH_USER}"
+  if read_nas "test -s '${REMOTE_DIR}/nas-auth-test.sh'" 2>/dev/null; then
+    ok "files written to ${REMOTE_DIR} are visible to later ssh sessions"
+  else
+    warn "a file written now is NOT visible to a later ssh session"
+    note "the probe below still works (single session); the smoke test may not"
+    printf '\n'
+    note "diagnostics:"
+    on_nas 'echo "  id:      $(id)"; echo "  HOME:    ${HOME}"; echo "  pwd:     $(pwd)"; ls -ld "${HOME}" 2>&1 | sed "s/^/  home:    /"; ls -ld "${HOME}/.synoterm-test" 2>&1 | sed "s/^/  workdir: /"; mount 2>/dev/null | grep -Ei "homes|/tmp" | sed "s/^/  mount:   /"' | sed 's/^/  /'
+    printf '\n'
+    note "workaround: pass --remote-dir with a path on a normal volume, e.g."
+    note "  --remote-dir /volume1/homes/${SSH_USER}/.synoterm-test"
+  fi
 fi
 
 # ------------------------------------------------- 3. DSM login + auth probe --
@@ -396,23 +480,24 @@ ${DSM_OTP:+data-urlencode = \"otp_code=${DSM_OTP}\"}"
   fi
 
   # --- probe authenticate.cgi on the NAS --------------------------------------
-  # Secrets travel over the SSH channel only: a 0600 file, then removed.
+  # The script and the cookie are streamed as one tar and executed in the same
+  # ssh session, so the cookie never touches the NAS filesystem for long and no
+  # cross-session visibility is required.
+  printf '\n'
   printf '%s\n%s\n' "${COOKIE_HEADER}" "${DSM_TOKEN}" > "${ROOT}/build/.cookie.$$"
   chmod 600 "${ROOT}/build/.cookie.$$"
-  copy_to_nas "${ROOT}/build/.cookie.$$" "${REMOTE_DIR}/cookie" \
-    || { rm -f "${ROOT}/build/.cookie.$$"; die "cannot copy the session cookie to ${REMOTE_DIR}"; }
-  rm -f "${ROOT}/build/.cookie.$$"
-  on_nas "chmod 600 '${REMOTE_DIR}/cookie'"
 
-  printf '\n'
-  if [ "${TRACE}" -eq 1 ]; then
-    trace "ssh ${TARGET} sh -x ${REMOTE_DIR}/nas-auth-test.sh --file ${REMOTE_DIR}/cookie"
-    probe_out="$(ssh "${SSH_OPTS[@]}" "${TARGET}" "sh -x '${REMOTE_DIR}/nas-auth-test.sh' --file '${REMOTE_DIR}/cookie'" 2>&1)"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    note "[dry-run] would stream nas-auth-test.sh + the session cookie and run the probe"
+    probe_out=""
   else
-    trace "ssh ${TARGET} sh ${REMOTE_DIR}/nas-auth-test.sh --file ${REMOTE_DIR}/cookie"
-    probe_out="$(ssh "${SSH_OPTS[@]}" "${TARGET}" "sh '${REMOTE_DIR}/nas-auth-test.sh' --file '${REMOTE_DIR}/cookie'" 2>&1)"
+    if [ "${TRACE}" -eq 1 ]; then probe_script="sh -x"; else probe_script="sh"; fi
+    probe_out="$(run_bundle "${probe_script} ./nas-auth-test.sh --file ./cookie" \
+      "${ROOT}/tools/nas-auth-test.sh" \
+      "${ROOT}/build/.cookie.$$:cookie" 2>&1)"
+    printf '%s\n' "${probe_out}" | sed 's/^/  /'
   fi
-  printf '%s\n' "${probe_out}" | sed 's/^/  /'
+  rm -f "${ROOT}/build/.cookie.$$"
 
   if printf '%s' "${probe_out}" | grep -Eq 'cookie only[[:space:]]*->[[:space:]]*[^<[:space:]]'; then
     COOKIE_ONLY_OK="yes"
@@ -420,10 +505,14 @@ ${DSM_OTP:+data-urlencode = \"otp_code=${DSM_OTP}\"}"
     COOKIE_ONLY_OK="no"
   else
     COOKIE_ONLY_OK="unknown"
-PROBED=0
-DSM_LOGGED_OUT=0
   fi
   PROBED=1
+  case "${COOKIE_ONLY_OK}" in
+    yes) ok "cookie-only authentication works on this DSM" ;;
+    no)  warn "cookie-only authentication did NOT return an account" ;;
+    *)   warn "could not interpret the probe output above" ;;
+  esac
+
   dsm_groups="$(read_nas "id -Gn '${DSM_USER}' 2>/dev/null" || true)"
   if [ -n "${dsm_groups}" ]; then
     why "DSM groups for ${DSM_USER}: ${dsm_groups}"
@@ -433,14 +522,6 @@ DSM_LOGGED_OUT=0
          note "test anyway, or set REQUIRE_GROUP in \$SYNOPKG_PKGVAR/etc/synoterm.conf" ;;
     esac
   fi
-
-  case "${COOKIE_ONLY_OK}" in
-    yes) ok "cookie-only authentication works on this DSM" ;;
-    no)  warn "cookie-only authentication did NOT return an account" ;;
-    *)   warn "could not interpret the probe output above" ;;
-  esac
-
-  on_nas "rm -f '${REMOTE_DIR}/cookie'"
 
   if [ -n "${FORCE_UI_STYLE}" ]; then
     UI_STYLE="${FORCE_UI_STYLE}"
@@ -477,11 +558,12 @@ SPK_VERSION="0.1.0-0001"
 if [ "${SKIP_SMOKE}" -eq 1 ]; then
   step "4/6  smoke test — skipped"
 else
-  step "4/6  smoke test: the binary from /tmp (no install, no nginx change)"
-why "Runs the real binary on the NAS as your SSH user, on 127.0.0.1:7382."
-why "An SSH tunnel forwards that loopback port to this machine so you can open"
-why "http://127.0.0.1:7382/ in a browser and use the terminal."
-why "Nothing is installed and DSM's nginx is not touched; you can Ctrl-C any time."
+  step "4/6  smoke test: the binary on the NAS (no install, no nginx change)"
+  why "Runs the real binary on the NAS as your SSH user, on 127.0.0.1:7382."
+  why "An SSH tunnel forwards that loopback port to this machine so you can open"
+  why "http://127.0.0.1:7382/ in a browser and use the terminal."
+  why "Nothing is installed and DSM's nginx is not touched; Ctrl-C is always safe."
+
   if [ "${DRY_RUN}" -eq 1 ] || confirm "Copy the binary + UI to ${REMOTE_DIR} and run it as ${SSH_USER} on port 7382?"; then
     want_machine="$(expected_machine "${ARCH}")"
     have_machine="$(elf_machine "${ROOT}/zig-out/bin/synoterm" || true)"
@@ -494,41 +576,60 @@ why "Nothing is installed and DSM's nginx is not touched; you can Ctrl-C any tim
       (cd "${ROOT}/frontend" && { [ -d node_modules ] || npm install --no-audit --no-fund >/dev/null; } && npm run build >/dev/null) || die "frontend build failed"
     fi
 
-    copy_to_nas "${ROOT}/zig-out/bin/synoterm" "${REMOTE_DIR}/synoterm"
-    on_nas "chmod 755 '${REMOTE_DIR}/synoterm'"
-    if [ "${DRY_RUN}" -eq 0 ]; then
-      on_nas "rm -rf '${REMOTE_DIR}/web' && mkdir -p '${REMOTE_DIR}/web'"
-      scp -P "${SSH_PORT}" -q -r "${ROOT}/frontend/dist/." "${TARGET}:${REMOTE_DIR}/web/"
+    smoke_ok=1
+    copy_to_nas "${ROOT}/zig-out/bin/synoterm" "${REMOTE_DIR}/synoterm" || smoke_ok=0
+    copy_tree_to_nas "${ROOT}/frontend/dist" "${REMOTE_DIR}/web" || smoke_ok=0
+    on_nas "chmod 755 '${REMOTE_DIR}/synoterm' 2>/dev/null"
+    if [ "${smoke_ok}" -eq 0 ]; then
+      fail "could not place the files on the NAS"
+      note "try --remote-dir <path on a normal volume>, e.g. --remote-dir /volume1/homes/${SSH_USER}/.synoterm-test"
+    elif ! read_nas "test -x '${REMOTE_DIR}/synoterm' && test -f '${REMOTE_DIR}/web/index.html'" 2>/dev/null; then
+      fail "files written now are not visible to a new ssh session — smoke test skipped"
+      note "this NAS has a per-session filesystem view; try --remote-dir <path>"
+      smoke_ok=0
     fi
 
-    on_nas "HOME=/tmp nohup '${REMOTE_DIR}/synoterm' --listen 7382 --auth dev --web-root '${REMOTE_DIR}/web' >'${REMOTE_DIR}/server.log' 2>&1 & echo \$! > '${REMOTE_DIR}/server.pid'; sleep 1; tail -n 3 '${REMOTE_DIR}/server.log'"
+    if [ "${smoke_ok}" -eq 1 ]; then
+      launch_out="$(on_nas "HOME='${REMOTE_DIR}' nohup '${REMOTE_DIR}/synoterm' --listen 7382 --auth dev --web-root '${REMOTE_DIR}/web' >'${REMOTE_DIR}/server.log' 2>&1 & echo SYNOTERM_PID=\$!; sleep 1; tail -n 3 '${REMOTE_DIR}/server.log'")"
+      printf '%s\n' "${launch_out}"
+      SMOKE_PID="$(printf '%s' "${launch_out}" | sed -n 's/^SYNOTERM_PID=\([0-9]*\)$/\1/p')"
+      if [ -n "${SMOKE_PID}" ]; then
+        ok "server pid ${SMOKE_PID}"
+      else
+        warn "could not read the server pid from the launch output"
+      fi
 
-    if [ "${DRY_RUN}" -eq 0 ]; then
-      note "tunnelling 127.0.0.1:7382 from the NAS to this machine…"
-      trace "ssh -N -L 7382:127.0.0.1:7382 ${TARGET} &"
-      ssh -N "${SSH_OPTS[@]}" -o ExitOnForwardFailure=yes -L "7382:127.0.0.1:7382" "${TARGET}" &
-      TUNNEL_PID=$!
-      attempt=0
-      while [ "${attempt}" -lt 30 ]; do
-        if (exec 3<>/dev/tcp/127.0.0.1/7382) 2>/dev/null; then break; fi
-        attempt=$((attempt + 1))
-        sleep 0.3
-      done
+      if [ "${DRY_RUN}" -eq 0 ]; then
+        note "tunnelling 127.0.0.1:7382 from the NAS to this machine…"
+        trace "ssh -N -L 7382:127.0.0.1:7382 ${TARGET} &"
+        ssh -N "${SSH_OPTS[@]}" -o ExitOnForwardFailure=yes -L "7382:127.0.0.1:7382" "${TARGET}" &
+        TUNNEL_PID=$!
+        attempt=0
+        while [ "${attempt}" -lt 30 ]; do
+          if (exec 3<>/dev/tcp/127.0.0.1/7382) 2>/dev/null; then break; fi
+          attempt=$((attempt + 1))
+          sleep 0.3
+        done
 
-      printf '\n'
-      bold "  Open this in your browser (a real terminal on the NAS):"
-      bold "      http://127.0.0.1:7382/"
-      printf '\n  Automated probe:\n'
-      trace "node tools/ws-test.mjs ws://127.0.0.1:7382/ws --expect SYNOTERM_WS_OK"
-      (cd "${ROOT}" && node tools/ws-test.mjs ws://127.0.0.1:7382/ws --expect SYNOTERM_WS_OK) \
-        || warn "probe failed — see ${REMOTE_DIR}/server.log on the NAS"
+        printf '\n'
+        bold "  Open this in your browser (a real terminal on the NAS):"
+        bold "      http://127.0.0.1:7382/"
+        printf '\n  Automated probe:\n'
+        trace "node tools/ws-test.mjs ws://127.0.0.1:7382/ws --expect SYNOTERM_WS_OK"
+        (cd "${ROOT}" && node tools/ws-test.mjs ws://127.0.0.1:7382/ws --expect SYNOTERM_WS_OK) \
+          || warn "probe failed — see ${REMOTE_DIR}/server.log on the NAS"
 
-      printf '\n  Press Enter when you are done with the browser terminal… '
-      read -r _ || true
-      kill "${TUNNEL_PID}" 2>/dev/null || true
+        printf '\n  Press Enter when you are done with the browser terminal… '
+        read -r _ || true
+        kill "${TUNNEL_PID}" 2>/dev/null || true
+      fi
+
+      if [ -n "${SMOKE_PID:-}" ]; then
+        on_nas "kill ${SMOKE_PID} 2>/dev/null; sleep 1; kill -9 ${SMOKE_PID} 2>/dev/null; echo '  server stopped'"
+      else
+        on_nas "pkill -f '${REMOTE_DIR}/synoterm' 2>/dev/null; echo '  server stopped'"
+      fi
     fi
-
-    on_nas "if [ -f '${REMOTE_DIR}/server.pid' ]; then kill \$(cat '${REMOTE_DIR}/server.pid') 2>/dev/null; fi; rm -f '${REMOTE_DIR}/server.pid'; echo '  server stopped'"
   fi
 fi
 
@@ -554,14 +655,15 @@ why "enables the nginx mount, and starts the service."
   (cd "${ROOT}" && ./tools/verify-spk.sh "${SPK_FILE}" | tail -n 3 | sed 's/^/  /')
 
   if [ "${DRY_RUN}" -eq 1 ] || confirm "Upload and install it now?"; then
-    copy_to_nas "${SPK_FILE}" "/tmp/$(basename "${SPK_FILE}")"
-    if on_nas_root "synopkg install '/tmp/$(basename "${SPK_FILE}")'"; then
+    REMOTE_SPK="${REMOTE_DIR}/$(basename "${SPK_FILE}")"
+    copy_to_nas "${SPK_FILE}" "${REMOTE_SPK}" || die "cannot copy the package to the NAS"
+    if on_nas_root "synopkg install '${REMOTE_SPK}'"; then
       ok "install command succeeded"
     else
       warn "synopkg reported an error — read the output above"
       note "common causes: trust level still blocks unsigned packages, or arch mismatch"
     fi
-    on_nas "rm -f '/tmp/$(basename "${SPK_FILE}")'"
+    on_nas "rm -f '${REMOTE_SPK}'"
 
     step "5b/6  verify the installed package"
     if [ "${DRY_RUN}" -eq 1 ]; then

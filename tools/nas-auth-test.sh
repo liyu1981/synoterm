@@ -42,7 +42,8 @@ case "${MODE}" in
     TOKEN=$(sed -n '2p' "${SECRET_FILE}")
     ;;
 esac
-CGI=/usr/syno/synoman/webman/modules/authenticate.cgi
+# Override only for local testing of the harness (e.g. a stub that echoes a name).
+CGI="${SYNOTERM_AUTHENTICATE_CGI:-/usr/syno/synoman/webman/modules/authenticate.cgi}"
 HOST="${SYNOTERM_HOST:-$(hostname)}"
 
 if [ -z "${COOKIE}" ]; then
