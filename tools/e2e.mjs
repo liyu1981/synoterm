@@ -167,6 +167,23 @@ try {
   });
   if (size.cols < 20 || size.rows < 5) failures.push(`unexpected terminal size ${JSON.stringify(size)}`);
 
+  // The control endpoint must exist and agree with the working session: the UI
+  // depends on it to explain refusals (a stale token, no DSM session, …).
+  const status = await page.evaluate(async () => {
+    const response = await fetch("/status", { credentials: "same-origin" });
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      body = undefined;
+    }
+    return { code: response.status, body };
+  });
+  if (status.code !== 200 || !status.body?.ok) {
+    failures.push(`/status returned ${status.code} ${JSON.stringify(status.body)}`);
+  }
+  if (!status.body?.version) failures.push("/status did not report a server version");
+
   // Optional slow check (SYNOTERM_E2E_SLOW=1): a session must survive idling
   // longer than the HTTP header timeout (30s).
   if (process.env.SYNOTERM_E2E_SLOW === "1") {

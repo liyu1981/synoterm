@@ -15,6 +15,11 @@ const auth = @import("auth.zig");
 
 const max_static_bytes: usize = 32 * 1024 * 1024;
 
+/// Bumped whenever the HTTP/WS surface changes, so an old binary that is still
+/// running can be recognised (the UI reports it when /status is missing).
+const server_version = "0.1.0";
+const api_version: u32 = 3;
+
 pub const AuthMode = enum { dev, dsm };
 
 pub const Config = struct {
@@ -222,10 +227,14 @@ fn handleConnection(ctx: *Ctx, fd: sys.fd_t) void {
     };
 
     if (std.mem.eql(u8, rel_path, "/healthz")) {
+        var body: [96]u8 = undefined;
+        const json = std.fmt.bufPrint(&body, "{{\"ok\":true,\"version\":\"{s}\",\"api\":{d}}}\n", .{
+            server_version, api_version,
+        }) catch "{\"ok\":true}\n";
         http.send(allocator, fd, .{
             .status = 200,
             .content_type = "application/json; charset=utf-8",
-            .body = "{\"ok\":true}\n",
+            .body = json,
             .extra_headers = "Cache-Control: no-store\r\n",
         }) catch {};
         return;
@@ -273,8 +282,15 @@ fn serveStatus(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: h
             var body = util.List(u8).init(allocator);
             defer body.deinit();
             body.appendFmt(
-                "{{\"ok\":true,\"user\":\"{s}\",\"sessions\":{d},\"max_sessions\":{d}}}\n",
-                .{ identity.user orelse "", ctx.active_sessions.load(.monotonic), ctx.cfg.max_sessions },
+                "{{\"ok\":true,\"user\":\"{s}\",\"sessions\":{d},\"max_sessions\":{d}," ++
+                    "\"version\":\"{s}\",\"api\":{d}}}\n",
+                .{
+                    identity.user orelse "",
+                    ctx.active_sessions.load(.monotonic),
+                    ctx.cfg.max_sessions,
+                    server_version,
+                    api_version,
+                },
             ) catch return;
             http.send(allocator, fd, .{
                 .status = 200,
@@ -527,8 +543,8 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
     }
 
     var ready_buf: [192]u8 = undefined;
-    const ready = std.fmt.bufPrint(&ready_buf, "{{\"type\":\"ready\",\"user\":\"{s}\"}}", .{
-        identity.user orelse "",
+    const ready = std.fmt.bufPrint(&ready_buf, "{{\"type\":\"ready\",\"user\":\"{s}\",\"version\":\"{s}\"}}", .{
+        identity.user orelse "", server_version,
     }) catch "{\"type\":\"ready\"}";
     link.sendText(ready);
 

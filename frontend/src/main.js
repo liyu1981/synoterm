@@ -71,6 +71,19 @@ function wsPath() {
 }
 
 /**
+ * HTTP API base for control endpoints (/status, /healthz).
+ *
+ * Derived from the *WebSocket* path, not from the page URL: with the DSM
+ * package the page is served from /webman/3rdparty/<pkg>/web/ while the API
+ * lives behind the nginx mount /synoterm/, so using the page path made /status
+ * 404 exactly where it was most needed.
+ */
+function apiPath(name) {
+  const base = wsPath().replace(/\/ws$/, "");
+  return `${base}/${name}`;
+}
+
+/**
  * DSM's CSRF token, if we can find it.
  *
  *  - DSM 7.2 app scripts get `?SynoToken=…` appended to their src; the wrapper
@@ -237,14 +250,24 @@ class Session {
    * loops into an actionable message.
    */
   async explainFailure() {
+    const target = apiPath("status");
     try {
-      const response = await fetch(`${appBase()}/status`, { credentials: "same-origin" });
+      const response = await fetch(target, { credentials: "same-origin" });
       const text = await response.text();
       let info;
       try {
         info = JSON.parse(text);
       } catch {
         info = undefined;
+      }
+      if (response.status === 404) {
+        // No /status at all: an old server binary, or the mount path is wrong.
+        const reason =
+          `server has no ${target} (old build, or the mount path is wrong) — ` +
+          `restart it with the current binary`;
+        this.manager.setNotice(reason, true);
+        this.term.write(`\r\n\x1b[31m${reason}\x1b[0m\r\n`);
+        return;
       }
       if (!response.ok) {
         const reason = info?.reason || `HTTP ${response.status}`;
