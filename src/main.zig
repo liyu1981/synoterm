@@ -221,6 +221,20 @@ fn handleConnection(ctx: *Ctx, fd: sys.fd_t) void {
         return;
     };
 
+    if (std.mem.eql(u8, rel_path, "/healthz")) {
+        http.send(allocator, fd, .{
+            .status = 200,
+            .content_type = "application/json; charset=utf-8",
+            .body = "{\"ok\":true}\n",
+            .extra_headers = "Cache-Control: no-store\r\n",
+        }) catch {};
+        return;
+    }
+    if (std.mem.eql(u8, rel_path, "/status")) {
+        serveStatus(ctx, allocator, fd, request);
+        return;
+    }
+
     if (isWebSocketUpgrade(request)) {
         if (!std.mem.eql(u8, rel_path, "/ws")) {
             http.sendError(allocator, fd, 404, "No websocket endpoint here");
@@ -229,6 +243,46 @@ fn handleConnection(ctx: *Ctx, fd: sys.fd_t) void {
         handleWebSocket(ctx, allocator, fd, request);
     } else {
         serveStatic(allocator, fd, rel_path, request, ctx.cfg);
+    }
+}
+
+/// Explains *why* a terminal connection would be refused. The browser cannot
+/// read the status of a failed WebSocket handshake, so the UI calls this first
+/// and can show "test token is stale" instead of an endless retry loop.
+fn serveStatus(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: http.Request) void {
+    const access = checkAccess(ctx, allocator, fd, request, false) catch {
+        http.sendError(allocator, fd, 500, "authorization failed");
+        return;
+    };
+    switch (access) {
+        .denied => |denied| {
+            var body = util.List(u8).init(allocator);
+            defer body.deinit();
+            body.appendFmt(
+                "{{\"ok\":false,\"code\":{d},\"reason\":\"{s}\"}}\n",
+                .{ denied.code, denied.reason },
+            ) catch return;
+            http.send(allocator, fd, .{
+                .status = denied.code,
+                .content_type = "application/json; charset=utf-8",
+                .body = body.items(),
+                .extra_headers = "Cache-Control: no-store\r\n",
+            }) catch {};
+        },
+        .allowed => |identity| {
+            var body = util.List(u8).init(allocator);
+            defer body.deinit();
+            body.appendFmt(
+                "{{\"ok\":true,\"user\":\"{s}\",\"sessions\":{d},\"max_sessions\":{d}}}\n",
+                .{ identity.user orelse "", ctx.active_sessions.load(.monotonic), ctx.cfg.max_sessions },
+            ) catch return;
+            http.send(allocator, fd, .{
+                .status = 200,
+                .content_type = "application/json; charset=utf-8",
+                .body = body.items(),
+                .extra_headers = "Cache-Control: no-store\r\n",
+            }) catch {};
+        },
     }
 }
 
@@ -279,50 +333,68 @@ const Identity = struct {
     home: [:0]const u8 = "/",
 };
 
-fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: http.Request) void {
-    // --- 1. same-origin check: WebSocket is not protected by CORS ---
-    const origin = request.header("Origin") orelse "";
+const Denied = struct {
+    code: u16,
+    reason: []const u8,
+};
+
+const Access = union(enum) {
+    allowed: Identity,
+    denied: Denied,
+};
+
+fn deny(code: u16, reason: []const u8) Access {
+    return .{ .denied = .{ .code = code, .reason = reason } };
+}
+
+/// Same-origin + DSM/dev authentication + account policy. Shared by the
+/// WebSocket upgrade and the `/status` probe so the UI can explain a refusal
+/// instead of retrying blindly (a failed WS handshake gives JS no details).
+fn checkAccess(
+    ctx: *Ctx,
+    allocator: std.mem.Allocator,
+    fd: sys.fd_t,
+    request: http.Request,
+    strict_origin: bool,
+) !Access {
     const host = request.header("Host") orelse "";
-    if (!ctx.cfg.insecure_origin and !originMatchesHost(origin, host)) {
-        http.sendError(allocator, fd, 403, "Cross-origin websocket denied");
-        return;
+
+    // --- 1. same-origin check: WebSocket is not protected by CORS ---
+    // Browsers always send Origin on a WebSocket upgrade. A same-origin
+    // `fetch()` (the /status probe) only sends `Sec-Fetch-Site`, so the strict
+    // path accepts that too; non-browser clients (curl) are allowed only when
+    // `strict_origin` is false, which is the /status endpoint.
+    if (!ctx.cfg.insecure_origin and !requestIsSameOrigin(request, host)) {
+        const browser_context = request.header("Origin") != null or
+            request.header("Referer") != null or
+            request.header("Sec-Fetch-Site") != null;
+        if (strict_origin or browser_context) {
+            return deny(403, "cross-origin request denied");
+        }
     }
 
-    // --- 2. subprotocols: CSRF token (dsm) and/or dev shared secret ---
-    var selected_protocol: ?[]const u8 = null;
+    // --- 2. subprotocols: DSM CSRF token and/or dev shared secret ---
     var syno_token: []const u8 = "";
-    var dev_proto: ?[]const u8 = null;
-    var syno_proto: ?[]const u8 = null;
     if (request.header("Sec-WebSocket-Protocol")) |protocols| {
         var it = std.mem.splitScalar(u8, protocols, ',');
         while (it.next()) |raw| {
             const proto = std.mem.trim(u8, raw, " \t");
             if (std.mem.startsWith(u8, proto, "synoterm.syno-token.")) {
-                if (syno_proto == null) {
-                    syno_proto = proto;
-                    if (decodeBase64Url(allocator, proto["synoterm.syno-token.".len..])) |decoded| {
-                        syno_token = decoded;
-                    }
+                if (decodeBase64Url(allocator, proto["synoterm.syno-token.".len..])) |decoded| {
+                    syno_token = decoded;
                 }
-            } else if (std.mem.startsWith(u8, proto, "synoterm.dev-token.")) {
-                if (dev_proto == null) dev_proto = proto;
             }
         }
     }
-    // RFC 6455: echo exactly one of the offered protocols.
-    selected_protocol = dev_proto orelse syno_proto;
 
     // --- 3. authenticate ---
     var identity = Identity{};
     switch (ctx.cfg.auth_mode) {
         .dev => {
-            // A dev server may be reachable from the LAN. Require the shared
-            // secret when one is configured, so "dev" is not "wide open".
             if (ctx.cfg.dev_token) |expected| {
                 const presented = devTokenFromRequest(request, allocator);
                 if (presented == null or !std.mem.eql(u8, presented.?, expected)) {
-                    http.sendError(allocator, fd, 403, "dev token missing or wrong (?t=...)");
-                    return;
+                    return deny(403, "test token missing or stale — reload the URL printed by nas-test.sh");
                 }
             }
         },
@@ -330,54 +402,63 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
             var peer_buf: [16]u8 = undefined;
             const peer = sys.peerIp(fd, &peer_buf) orelse "127.0.0.1";
             const cookie = request.header("Cookie") orelse "";
-
             const no_env = [_][*:0]const u8{};
-            const env = auth.cgiEnv(allocator, cookie, syno_token, host, peer, &no_env) catch {
-                http.sendError(allocator, fd, 500, "Out of memory");
-                return;
-            };
-            const capture = auth.runCapture(allocator, auth.authenticate_cgi, &no_env, env) catch {
-                http.sendError(allocator, fd, 500, "DSM session lookup failed");
-                return;
-            };
-            if (capture.status == 127) {
-                http.sendError(allocator, fd, 500, "authenticate.cgi is not available on this DSM build");
-                return;
-            }
-            if (capture.status != 0) {
-                http.sendError(allocator, fd, 500, "DSM session lookup failed");
-                return;
-            }
+            const env = auth.cgiEnv(allocator, cookie, syno_token, host, peer, &no_env) catch
+                return deny(500, "out of memory");
+            const capture = auth.runCapture(allocator, auth.authenticate_cgi, &no_env, env) catch
+                return deny(500, "DSM session lookup failed");
+            if (capture.status == 127) return deny(500, "authenticate.cgi is missing on this DSM build");
+            if (capture.status != 0) return deny(500, "DSM session lookup failed");
             const user = std.mem.trim(u8, capture.output, " \t\r\n");
-            if (user.len == 0) {
-                http.sendError(allocator, fd, 401, "A valid DSM login is required");
-                return;
-            }
-            if (!validAccountName(user)) {
-                http.sendError(allocator, fd, 403, "Invalid account");
-                return;
-            }
+            if (user.len == 0) return deny(401, "no DSM session — open the terminal from the DSM desktop, or reload the page");
+            if (!validAccountName(user)) return deny(403, "invalid account name");
             if (ctx.cfg.require_group.len > 0 and !accountInGroup(allocator, user, ctx.cfg.require_group)) {
-                http.sendError(allocator, fd, 403, "This account may not open a terminal");
-                return;
+                return deny(403, "this account is not allowed to open a terminal");
             }
-            const pw = (sys.lookupPasswd(allocator, "/etc/passwd", user) catch null) orelse {
-                http.sendError(allocator, fd, 403, "Account is not a local DSM user");
-                return;
-            };
-            identity.user = allocator.dupeSentinel(u8, user, 0) catch {
-                http.sendError(allocator, fd, 500, "Out of memory");
-                return;
-            };
+            const pw = (sys.lookupPasswd(allocator, "/etc/passwd", user) catch null) orelse
+                return deny(403, "account is not a local DSM user");
+            identity.user = allocator.dupeSentinel(u8, user, 0) catch return deny(500, "out of memory");
             identity.uid = pw.uid;
             identity.gid = pw.gid;
             if (sys.homeDir(allocator, "/etc/passwd", user) catch null) |home| {
-                if (home.len > 0) {
-                    identity.home = allocator.dupeSentinel(u8, home, 0) catch "/";
-                }
+                if (home.len > 0) identity.home = allocator.dupeSentinel(u8, home, 0) catch "/";
             }
         },
     }
+
+    if (identity.user != null and sys.geteuid() != 0) {
+        return deny(500, "synoterm lacks the setuid tool privilege");
+    }
+    return .{ .allowed = identity };
+}
+
+/// RFC 6455: echo exactly one of the offered subprotocols.
+fn selectSubprotocol(request: http.Request) ?[]const u8 {
+    const protocols = request.header("Sec-WebSocket-Protocol") orelse return null;
+    var it = std.mem.splitScalar(u8, protocols, ',');
+    var dev: ?[]const u8 = null;
+    var syno: ?[]const u8 = null;
+    while (it.next()) |raw| {
+        const proto = std.mem.trim(u8, raw, " \t");
+        if (dev == null and std.mem.startsWith(u8, proto, "synoterm.dev-token.")) dev = proto;
+        if (syno == null and std.mem.startsWith(u8, proto, "synoterm.syno-token.")) syno = proto;
+    }
+    return dev orelse syno;
+}
+
+fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: http.Request) void {
+    const access = checkAccess(ctx, allocator, fd, request, true) catch {
+        http.sendError(allocator, fd, 500, "authorization failed");
+        return;
+    };
+    var identity: Identity = switch (access) {
+        .denied => |denied| {
+            http.sendError(allocator, fd, denied.code, denied.reason);
+            return;
+        },
+        .allowed => |allowed| allowed,
+    };
+    _ = &identity;
 
     if (identity.user != null and sys.geteuid() != 0) {
         http.sendError(allocator, fd, 500, "synoterm is not running with the setuid tool privilege");
@@ -400,6 +481,7 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
     var accept_buf: [28]u8 = undefined;
     const accept = ws.acceptKey(&accept_buf, key);
 
+    const selected_protocol = selectSubprotocol(request);
     var response = util.List(u8).init(allocator);
     defer response.deinit();
     response.appendFmt(
@@ -546,6 +628,15 @@ fn queryParam(query: []const u8, key: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, pair[0..eq], key)) return pair[eq + 1 ..];
     }
     return null;
+}
+
+fn requestIsSameOrigin(request: http.Request, host: []const u8) bool {
+    if (request.header("Origin")) |origin| return originMatchesHost(origin, host);
+    if (request.header("Sec-Fetch-Site")) |site| {
+        if (std.mem.eql(u8, site, "same-origin") or std.mem.eql(u8, site, "none")) return true;
+    }
+    if (request.header("Referer")) |referer| return originMatchesHost(referer, host);
+    return false;
 }
 
 fn originMatchesHost(origin: []const u8, host: []const u8) bool {

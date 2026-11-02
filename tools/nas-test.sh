@@ -649,6 +649,7 @@ else
         fi
         bold "      ${SMOKE_URL}"
         printf '\n'
+        note "the ?t= value is new on every run: reload this URL (do not reuse an old tab)."
         warn "this dev server runs a shell as ${SSH_USER} and has no DSM login;"
         note "it is reachable from your network until this step stops it, and the"
         note "secret above is the only thing in front of it."

@@ -103,7 +103,21 @@ Rejection responses (plain HTTP, before the upgrade):
 | 429 | session limit reached |
 | 500 | `authenticate.cgi` failed / binary lacks the setuid privilege |
 
-## 5. Framing rules
+## 5. Plain HTTP endpoints
+
+| Path | Purpose |
+| --- | --- |
+| `GET /healthz` | `{"ok":true}` — reachability probe, no auth |
+| `GET /status` | runs the **same** origin/auth/policy checks as the upgrade and returns `{"ok":true,"user":"…","sessions":n,"max_sessions":n}` or `{"ok":false,"code":401,"reason":"…"}` |
+
+`/status` exists because a browser cannot read the status code of a failed
+WebSocket handshake: when a connection drops, the UI fetches `/status` and shows
+the reason ("test token missing or stale — reload the URL printed by
+nas-test.sh", "no DSM session", "this account is not allowed…") instead of an
+endless `disconnected, retrying in 1s…` loop. Non-browser clients (curl) may call
+`/status` without an `Origin` header; the WebSocket upgrade itself is strict.
+
+## 6. Framing rules
 
 Server-side limits (all enforced in `src/ws.zig`):
 
@@ -118,7 +132,7 @@ Server-side limits (all enforced in `src/ws.zig`):
 Ping/pong is handled transparently; the server also answers pings while the
 PTY is idle, which keeps DSM's nginx proxy from timing the connection out.
 
-## 6. Compatibility notes
+## 7. Compatibility notes
 
 * `resize` may arrive before `ready`; it is applied to the PTY as soon as it
   exists (the client sends its current size on `open`).

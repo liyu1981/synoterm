@@ -192,7 +192,11 @@ class Session {
       this.socket = undefined;
       if (this.closedByUser) return;
       this.setState("error");
+      // Only explain the first failure of a streak; the status line carries
+      // the rest so the terminal stays readable.
+      if (this.attempts === 0) this.explainFailure();
       this.scheduleReconnect();
+      this.manager.updateStatus();
     });
 
     socket.addEventListener("error", () => {
@@ -208,6 +212,8 @@ class Session {
       return;
     }
     if (message.type === "ready") {
+      this.attempts = 0;
+      this.manager.setNotice("", false);
       this.setState("open");
       if (message.user) this.name = `${message.user}@nas`;
       this.manager.renderTabs();
@@ -222,8 +228,39 @@ class Session {
   scheduleReconnect() {
     if (this.closedByUser) return;
     const delay = Math.min(8000, 500 * 2 ** this.attempts++);
-    this.term.write(`\r\n\x1b[33mdisconnected, retrying in ${Math.round(delay / 1000)}s…\x1b[0m\r\n`);
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
+  }
+
+  /**
+   * A refused WebSocket handshake gives JavaScript no status code, so ask the
+   * server why (same checks, plain HTTP). Turns "disconnected, retrying…"
+   * loops into an actionable message.
+   */
+  async explainFailure() {
+    try {
+      const response = await fetch(`${appBase()}/status`, { credentials: "same-origin" });
+      const text = await response.text();
+      let info;
+      try {
+        info = JSON.parse(text);
+      } catch {
+        info = undefined;
+      }
+      if (!response.ok) {
+        const reason = info?.reason || `HTTP ${response.status}`;
+        this.manager.setNotice(reason, true);
+        this.term.write(`\r\n\x1b[31m${reason}\x1b[0m\r\n`);
+        return;
+      }
+      const user = info?.user ? ` as ${info.user}` : "";
+      this.term.write(
+        `\r\n\x1b[33mdisconnected${user}; the server is reachable — retrying…\x1b[0m\r\n`,
+      );
+      this.manager.setNotice(`disconnected — retrying (${this.attempts})`, true);
+    } catch {
+      this.term.write("\r\n\x1b[33mdisconnected; server not reachable — retrying…\x1b[0m\r\n");
+      this.manager.setNotice("server not reachable — retrying", true);
+    }
   }
 
   fail(err) {
@@ -397,6 +434,12 @@ class TabManager {
     if (tab) tab.dataset.state = session.state;
   }
 
+  setNotice(message, isError) {
+    this.notice = message;
+    this.noticeIsError = !!isError;
+    this.updateStatus();
+  }
+
   updateStatus() {
     const el = document.getElementById("status");
     const text = document.getElementById("status-text");
@@ -405,6 +448,12 @@ class TabManager {
       text.textContent = "";
       return;
     }
+    if (this.notice && (session.state !== "open" || this.noticeIsError)) {
+      text.textContent = this.notice;
+      el.classList.toggle("error", !!this.noticeIsError);
+      return;
+    }
+    this.notice = undefined;
     const labels = {
       connecting: "connecting…",
       open: "connected",
