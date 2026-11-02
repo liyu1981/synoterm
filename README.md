@@ -2,25 +2,95 @@
 
 # synoterm
 
-A web terminal that lives inside the Synology DSM desktop: **xterm.js** in the
-browser, a small **Zig** binary on the NAS, and a native `.spk` package that
-plugs into DSM 7.1+ without opening a single extra firewall port.
+A terminal that opens **inside the Synology DSM desktop** as a real desktop
+window: **xterm.js** renders it, a small **Zig** binary owns the PTY, and it
+ships as a native `.spk` with no runtime dependencies on the NAS.
 
 ```
- DSM desktop (https://nas:5001)
- ┌──────────────────────────────────────────────────────────────┐
- │  Terminal  window  (SYNO.SDS.App.Synoterm.Instance)          │
- │  ┌────────────────────────────────────────────────────────┐  │
- │  │  iframe → /webman/3rdparty/synoterm/web/index.html     │  │
- │  │  xterm.js  ⇄  wss://nas:5001/synoterm/ws               │  │
- │  └────────────────────────────────────────────────────────┘  │
- └──────────────────────────────────────────────────────────────┘
-                    │ DSM nginx (conf/resource → web-config)
-                    ▼
-        127.0.0.1:7381  synoterm (Zig, setuid tool)
-                    │  authenticate.cgi → DSM user
-                    ▼
-        /dev/ptmx ── fork ── setuid(user) ── exec /bin/bash
+ DSM desktop (http://nas:5000)                        DSM 7.1 window (ExtJS)
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │  Terminal  window  (SYNO.SDS.App.Synoterm.Instance)                  │
+ │  ┌────────────────────────────────────────────────────────────────┐  │
+ │  │  iframe → /webman/3rdparty/synoterm/web/index.html             │  │
+ │  │  xterm.js  ⇄  ws://nas:7381/ws        (own port, cookie sent)  │  │
+ │  │            ⇄  /synoterm/ws            (optional nginx mount)   │  │
+ │  └────────────────────────────────────────────────────────────────┘  │
+ └──────────────────────────────────────────────────────────────────────┘
+                              │ DSM cookie + SynoToken
+                              ▼
+                 127.0.0.1:7381 or 0.0.0.0:7381  synoterm (Zig, setuid tool)
+                              │  authenticate.cgi → DSM user
+                              ▼
+                 /dev/ptmx ── fork ── setuid(user) ── exec /bin/bash
+```
+
+## Scope
+
+**Target: DSM 7.0/7.1.** Verified on **DSM 7.1.1-42962 (DS218+)**. The desktop
+window is registered as an ExtJS app (`type: "app"` + `SYNO.SDS.AppWindow`),
+which is what DSM 7.0/7.1 still use. DSM 7.2's Vue window is a build flag
+(`SYNOTERM_UI_STYLE=vue`), not the target, and `url` (a browser popup) exists only
+as a diagnostic fallback.
+
+In scope:
+
+* a **terminal** — real PTY, real shell, resize, multiple windows, scrollback,
+  font/size/line-height settings;
+* **x86_64, armv8 (aarch64), armv7** — one static musl binary per architecture;
+* **DSM account integration** — the shell runs as the logged-in DSM user, admin
+  group only, local DSM accounts only (domain/LDAP accounts are refused);
+* **no new services required** — no SSH, no Python, no Node.js on the NAS.
+
+Out of scope for 1.x:
+
+* sessions that survive closing the window (deliberate: closing the terminal ends
+  the shell; `libghostty-vt` persistence is designed but deferred);
+* file manager / upload / SFTP features;
+* DSM 6.x, DSM 7.2+ window frameworks as the primary target;
+* signed packages — builds are unsigned, which is why installation has two steps.
+
+## Install on DSM 7.1
+
+1. **Package Center → Manual Install** → `synoterm-<version>-<arch>.spk`
+   (architecture per `uname -m`: `x86_64`, `aarch64` → armv8, `armv7`).
+   DSM 7 refuses CLI installs of unsigned packages
+   (`error 320, non-synology-signed package should not use internal worker`), so
+   the install must go through Package Center's UI.
+
+2. **One-time, as root — mount the terminal on DSM's web server:**
+
+   ```sh
+   sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh
+   ```
+
+   **Why this step exists:** the clean way to reach a WebSocket is DSM's own nginx
+   (`https://nas:5001/synoterm/…`), and DSM exposes that as a *package resource*
+   handled by one of its **internal workers**. DSM 7 only lets
+   Synology-signed packages use internal workers — a self-built package is
+   rejected before it is installed. So the package ships the same nginx snippet
+   as a file and this helper applies it from your root shell instead: it finds a
+   directory nginx already includes inside a `server {}` block, runs `nginx -t`,
+   **removes the file again if nginx would reject it**, then restarts nginx.
+
+   *Optional.* Skip it and the app still works: DSM serves the UI from
+   `ui/web`, and the terminal listens on port 7381 of the NAS (allow TCP 7381 in
+   *Control Panel → Security → Firewall*). The UI detects which mode is available
+   (`window.synotermBackend` in the console shows `proxy` or `direct`).
+
+3. **DSM → main menu → Terminal.** The shell runs as your DSM account; check with
+   `id`, `pwd`, `stty size`.
+
+Upgrading is step 1 again (install over the old version); `contrib/` changes too,
+so re-run step 2 only if the helper's output asks you to. Removing:
+
+```sh
+sudo /var/packages/synoterm/target/contrib/uninstall-nginx-mount.sh   # before uninstalling
+```
+
+Troubleshooting in one command:
+
+```sh
+sudo /var/packages/synoterm/target/contrib/diagnose.sh
 ```
 
 ## Why this shape
@@ -30,13 +100,14 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
   and it breaks for 2FA/LDAP accounts. Instead, the backend asks DSM who the
   browser session belongs to (`authenticate.cgi`) and forks a PTY **as that
   user** — the same thing DSM's own terminal tooling does.
-* **No internal worker — the mount ships as files.** DSM 7 refuses to let an
-  unsigned package use DSM's nginx (error 320 `not use internal worker`), so the
-  package ships the snippet plus a root helper and you apply it once:
-  `sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh`. It is
-  validated with `nginx -t` and rolled back on failure. Without it the app still
-  works in direct mode (`http://nas:7381`), since the DSM cookie is host-scoped.
-  See [docs/dsm-integration.md §4](docs/dsm-integration.md#4-transport-ship-the-mount-apply-it-by-hand).
+* **No internal worker.** DSM 7 only lets Synology-signed packages use the
+  framework's internal workers, and the nginx mount is one of them. The package
+  therefore ships the snippet as a file and a root helper applies it once — see
+  [Install](#install-on-dsm-71) and
+  [docs/dsm-integration.md §4](docs/dsm-integration.md#4-transport-ship-the-mount-apply-it-by-hand).
+  Cookies are host-scoped, not port-scoped, so the same DSM session also
+  authenticates the direct (`nas:7381`) transport: the mount is about HTTPS and
+  same-origin convenience, not about auth.
 * **One static binary.** Zig cross-compiles to `x86_64`/`aarch64`/`armv7`
   **static musl** binaries; libc is embedded, so the binary does not depend on
   DSM's glibc (7.1 ships 2.26, while a native build needs 2.36+). No Node.js, no
@@ -54,8 +125,8 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
 | --- | --- |
 | Zig backend (HTTP, WebSocket, PTY bridge, resize) | working, unit tested |
 | xterm.js frontend (tabs, reconnect, fit, status bar, font settings) | working, e2e tested in headless Chromium |
-| DSM package skeleton (`INFO`, `conf/privilege`, nginx snippet, `ui/`) | written; ExtJS app-window registration is the default for 7.0/7.1 |
-| DSM session auth (`authenticate.cgi` + group check) | implemented; DSM 7.1 requires cookie **and** SynoToken — token discovery is being verified on-device (`ui/auth-probe.cgi` reports what DSM provides) |
+| DSM package (`INFO`, `conf/privilege`, ExtJS app window, contrib helpers) | **installed and running on a DS218+ / DSM 7.1.1** |
+| DSM session auth (`authenticate.cgi` + group check) | **working on DSM 7.1.1** (cookie + SynoToken; `ui/auth-probe.cgi` reports what DSM hands a package CGI) |
 | Multi-arch SPK build (`tools/build-spk.sh`) | working (x86_64 verified, armv8/armv7 cross-compiled) |
 | v1 policy: DSM 7.1 floor, admins only, local accounts only, kill on disconnect | implemented |
 | Service config (`$SYNOPKG_PKGVAR/etc/synoterm.conf`: require-group, max sessions) | implemented |
@@ -94,25 +165,25 @@ Pushing a version tag builds every architecture and publishes a GitHub Release
 with the `.spk` files, a `SHA256SUMS`, and the install/upgrade/rollback steps:
 
 ```sh
-git tag -a v0.1.0 -m "synoterm 0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "synoterm 0.1.1"
+git push origin v0.1.1
 ```
 
-The tag becomes the DSM package version: `v0.1.0` → `0.1.0-<CI run number>`,
-`v0.1.0-42` → `0.1.0-42` (explicit build number, for a re-release), and
-`v0.1.0-rc1` marks the release as a prerelease. The workflow
+The tag becomes the DSM package version: `v0.1.1` → `0.1.1-<CI run number>`,
+`v0.1.1-42` → `0.1.1-42` (explicit build number, for a re-release), and
+`v0.1.1-rc1` marks the release as a prerelease. The workflow
 (`.github/workflows/release.yml`) runs the unit tests and the static/glibc check
 before packaging, then verifies each `.spk` with `tools/verify-spk.sh`.
 
 ## Build a DSM package
 
 ```sh
-./tools/build-spk.sh x86_64 0.1.0-0001     # → build/synoterm-0.1.0-0001-x86_64.spk
-./tools/build-spk.sh armv8  0.1.0-0001
-./tools/build-spk.sh armv7  0.1.0-0001
+./tools/build-spk.sh x86_64 0.1.1-0001     # → build/synoterm-0.1.1-0001-x86_64.spk
+./tools/build-spk.sh armv8  0.1.1-0001
+./tools/build-spk.sh armv7  0.1.1-0001
 
 # DSM 7.2 desktop framework (v-app-window) instead of the 7.1-safe .url style:
-SYNOTERM_UI_STYLE=vue ./tools/build-spk.sh x86_64 0.1.0-0001
+SYNOTERM_UI_STYLE=vue ./tools/build-spk.sh x86_64 0.1.1-0001
 ```
 
 Default UI style is `url` (documented for 7.x, works on the 7.1 floor). Under
