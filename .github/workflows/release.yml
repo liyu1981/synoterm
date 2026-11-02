@@ -1,0 +1,216 @@
+name: release
+
+# Builds the Synology packages for every supported architecture and publishes
+# them as a GitHub Release when a version tag is pushed:
+#
+#   git tag -a v0.1.0 -m "synoterm 0.1.0"
+#   git push origin v0.1.0
+#
+# The tag supplies the DSM package version:
+#   v0.1.0        → package version 0.1.0-<run number>   (build number = CI run)
+#   v0.1.0-42     → package version 0.1.0-42             (build number explicit)
+#
+# Release candidates: tag them v0.1.0-rc1 and the release is marked prerelease.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0). Leave empty to build without publishing."
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  OS_MIN_VER: "7.1-42661"
+  # Default desktop registration: a real DSM window on DSM 7.0/7.1.
+  UI_STYLE: extjs
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      feature: ${{ steps.v.outputs.feature }}
+      build: ${{ steps.v.outputs.build }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive the DSM package version from the tag
+        id: v
+        run: |
+          set -eu
+          raw="${{ github.event.inputs.tag || github.ref_name }}"
+          if [ -z "${raw}" ]; then
+            echo "::error::no tag to build; push a v*.*.* tag or pass one to workflow_dispatch"
+            exit 1
+          fi
+          tag="${raw#refs/tags/}"
+
+          # DSM wants [feature]-[build], numbers only, each ≤ 2^31-1.
+          feature="$(printf '%s' "${tag#v}" | sed 's/^\([0-9][0-9.]*\).*/\1/')"
+          # DSM allows [major].[minor].[micro]-[build]; keep it to three numbers.
+          case "${feature}" in
+            ''|*[!0-9.]*)
+              echo "::error::tag '${tag}' does not start with a version like v1.2.3"; exit 1 ;;
+            *.*.*.*)
+              echo "::error::tag '${tag}' has too many version components; use v<major>.<minor>.<patch>[-build]"; exit 1 ;;
+          esac
+          feature="${feature%.}"
+
+          build=""
+          case "${tag}" in
+            *-*) candidate="${tag##*-}"; build="$(printf '%s' "${candidate}" | sed 's/[^0-9].*//')" ;;
+          esac
+          build="${build:-${{ github.run_number }}}"
+
+          case "${build}" in
+            ''|*[!0-9]*) echo "::error::build number '${build}' is not numeric"; exit 1 ;;
+          esac
+
+          prerelease=false
+          case "${tag}" in
+            *-rc*|*-RC*|*-beta*|*-alpha*) prerelease=true ;;
+          esac
+
+          version="${feature}-${build}"
+          echo "tag=${tag} feature=${feature} build=${build} version=${version}" >&2
+          {
+            echo "version=${version}"
+            echo "feature=${feature}"
+            echo "build=${build}"
+            echo "prerelease=${prerelease}"
+          } >>"$GITHUB_OUTPUT"
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.17.0"
+      - name: Toolchain matches .zigversion
+        run: |
+          set -eu
+          want="$(cat .zigversion)"
+          got="$(zig version)"
+          echo "pinned: ${want}, installed: ${got}"
+          [ "${want}" = "${got}" ] || { echo "::error::.zigversion (${want}) != toolchain (${got})"; exit 1; }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: unit tests
+        run: zig build test --summary all
+      - name: frontend bundle
+        run: |
+          cd frontend
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: static build, as shipped
+        run: |
+          zig build -Doptimize=ReleaseSmall
+          if LC_ALL=C grep -qa 'GLIBC_2\.' zig-out/bin/synoterm; then
+            echo "::error::release binary depends on glibc; expected static musl"; exit 1
+          fi
+
+  spk:
+    needs: [resolve, check]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, armv8, armv7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.17.0"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: frontend bundle
+        run: |
+          cd frontend
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: build ${{ matrix.arch }} package
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -eu
+          SYNOTERM_OS_MIN_VER="${OS_MIN_VER}" \
+          SYNOTERM_UI_STYLE="${UI_STYLE}" \
+            ./tools/build-spk.sh "${{ matrix.arch }}" "${VERSION}"
+          ./tools/verify-spk.sh "build/synoterm-${VERSION}-${{ matrix.arch }}.spk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spk-${{ matrix.arch }}
+          path: build/*.spk
+          if-no-files-found: error
+
+  release:
+    needs: [resolve, spk]
+    if: needs.resolve.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum ./*.spk > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: synoterm ${{ needs.resolve.outputs.feature }}
+          draft: false
+          prerelease: ${{ needs.resolve.outputs.prerelease == 'true' }}
+          fail_on_unmatched_files: true
+          body: |
+            Synology package for DSM **7.1+** (static musl binary, no runtime
+            dependencies). `x86_64`, `armv8` (aarch64) and `armv7` builds below.
+
+            | step | what to do |
+            | --- | --- |
+            | 1 | Package Center → Manual Install → the `.spk` for your NAS architecture |
+            | 2 | **one-time, as root**: `sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh` |
+            | 3 | DSM → main menu → Terminal |
+
+            Step 2 is optional: without it the app still works, with the UI served
+            by DSM and the terminal reachable on port 7381 of the NAS (allow it in
+            *Control Panel → Security → Firewall*).
+
+            DSM 7 refuses CLI installs of unsigned packages (`error 320,
+            non-synology-signed package should not use internal worker`), so the
+            install has to go through Package Center — the package itself ships no
+            privileged resource.
+
+            Verify a download with `sha256sum -c SHA256SUMS`.
+
+            Troubleshooting: `sudo /var/packages/synoterm/target/contrib/diagnose.sh`.
+          files: |
+            dist/*.spk
+            dist/SHA256SUMS

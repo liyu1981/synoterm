@@ -88,6 +88,22 @@ zig build test
 node tools/e2e.mjs          # needs a Chromium; see the script header
 ```
 
+## Releasing
+
+Pushing a version tag builds every architecture and publishes a GitHub Release
+with the `.spk` files, a `SHA256SUMS`, and the install/upgrade/rollback steps:
+
+```sh
+git tag -a v0.1.0 -m "synoterm 0.1.0"
+git push origin v0.1.0
+```
+
+The tag becomes the DSM package version: `v0.1.0` → `0.1.0-<CI run number>`,
+`v0.1.0-42` → `0.1.0-42` (explicit build number, for a re-release), and
+`v0.1.0-rc1` marks the release as a prerelease. The workflow
+(`.github/workflows/release.yml`) runs the unit tests and the static/glibc check
+before packaging, then verifies each `.spk` with `tools/verify-spk.sh`.
+
 ## Build a DSM package
 
 ```sh

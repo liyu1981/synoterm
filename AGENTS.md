@@ -20,6 +20,8 @@ Conventions for anyone (human or agent) working in this repository.
     `.zig-cache/`) — they are gitignored, keep it that way;
   * secrets or transcripts containing credentials, cookies, tokens or
     passwords (`--log` files must be redacted before they are shared).
+* Never create, move or push **tags**, and never publish a GitHub release: the
+  release workflow runs when the user pushes a `v*` tag.
 * Authorship is the user's configured identity (`Yu Li <liyu1981@gmail.com>`).
   Do **not** pass `-c user.name=…` / `-c user.email=…` overrides to `git
   commit`.
