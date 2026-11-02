@@ -6,6 +6,7 @@
 //   url                    default ws://127.0.0.1:8080/ws
 //   --cookie '<header>'    Cookie header (DSM session), e.g. 'id=abc123'
 //   --token '<token>'      SynoToken; sent as the WebSocket subprotocol
+//   --dev-token '<token>'  dev server shared secret (synoterm.dev-token.*)
 //   --origin '<url>'       Origin header override (default: derived from url)
 //   --insecure             accept self-signed TLS (DSM's default certificate)
 //   --expect '<text>'      text that must appear in the output
@@ -15,7 +16,7 @@ import WebSocket from "ws";
 
 const args = process.argv.slice(2);
 let url = "ws://127.0.0.1:8080/ws";
-const options = { cookie: "", token: "", origin: "", insecure: false, expect: "SYNOTERM_WS_OK", timeout: 10, quiet: false };
+const options = { cookie: "", token: "", devToken: "", origin: "", insecure: false, expect: "SYNOTERM_WS_OK", timeout: 10, quiet: false };
 
 for (let i = 0; i < args.length; i += 1) {
   const arg = args[i];
@@ -23,6 +24,7 @@ for (let i = 0; i < args.length; i += 1) {
     url = arg;
   } else if (arg === "--cookie") options.cookie = args[++i] || "";
   else if (arg === "--token") options.token = args[++i] || "";
+  else if (arg === "--dev-token") options.devToken = args[++i] || "";
   else if (arg === "--origin") options.origin = args[++i] || "";
   else if (arg === "--expect") options.expect = args[++i] || "";
   else if (arg === "--timeout") options.timeout = Number(args[++i] || 10);
@@ -38,7 +40,9 @@ const origin = options.origin || new URL(url).origin;
 const headers = { Origin: origin };
 if (options.cookie) headers.Cookie = options.cookie;
 
-const protocols = options.token ? [`synoterm.syno-token.${base64url(options.token)}`] : undefined;
+const protocols = [];
+if (options.devToken) protocols.push(`synoterm.dev-token.${base64url(options.devToken)}`);
+if (options.token) protocols.push(`synoterm.syno-token.${base64url(options.token)}`);
 
 function base64url(value) {
   return Buffer.from(value, "utf8").toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
@@ -49,9 +53,14 @@ const log = (...parts) => {
 };
 
 log(`connecting ${url}`);
-log(`  origin: ${origin}${options.cookie ? `, cookie: ${maskCookie(options.cookie)}` : ""}${options.token ? ", token: <redacted>" : ""}`);
+log(
+  `  origin: ${origin}` +
+    (options.cookie ? `, cookie: ${maskCookie(options.cookie)}` : "") +
+    (options.token ? ", token: <redacted>" : "") +
+    (options.devToken ? ", dev-token: <redacted>" : ""),
+);
 
-const socket = new WebSocket(url, protocols, {
+const socket = new WebSocket(url, protocols.length > 0 ? protocols : undefined, {
   headers,
   ...(options.insecure ? { rejectUnauthorized: false } : {}),
 });

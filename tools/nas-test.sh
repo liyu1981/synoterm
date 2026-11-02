@@ -38,6 +38,8 @@ UNINSTALL=0
 COOKIE_ARG=""
 FORCE_UI_STYLE=""
 REMOTE_DIR_ARG=""
+SMOKE_PORT="7382"
+SMOKE_BIND="0.0.0.0"
 COOKIE_ONLY_OK="unknown"
 PROBED=0
 DSM_LOGGED_OUT=0
@@ -63,6 +65,9 @@ Options:
   --cookie '<header>' use a Cookie header instead of logging in
   --ui-style url|vue  force the package flavour instead of probing
   --remote-dir <path> directory on the NAS for temporary files (default: $HOME/.synoterm-test)
+  --smoke-port <port> port for the smoke-test server (default: 7382)
+  --loopback          bind the smoke-test server to 127.0.0.1 instead of 0.0.0.0
+                      (only useful if you test from an SSH tunnel yourself)
   --yes               do not ask before the smoke test / install (never uninstalls)
   --quiet             do not print the commands being run
   --trace             also trace inside bash (set -x) and remote scripts (sh -x)
@@ -88,6 +93,8 @@ while [ $# -gt 0 ]; do
     --cookie) COOKIE_ARG="${2:?}"; shift 2 ;;
     --ui-style) FORCE_UI_STYLE="${2:?}"; shift 2 ;;
     --remote-dir) REMOTE_DIR_ARG="${2:?}"; shift 2 ;;
+    --smoke-port) SMOKE_PORT="${2:?}"; shift 2 ;;
+    --loopback) SMOKE_BIND="127.0.0.1"; shift ;;
     --yes|-y) YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -128,7 +135,9 @@ redact() { # hide secrets in anything we print
     -e 's/(--token[ =]+)[^ ]*/\1********/g' \
     -e 's/(otp_code[=:])[^ &"]*/\1********/g' \
     -e 's/(HTTP_X_SYNO_TOKEN=)[^ ]*/\1********/g' \
-    -e 's/(Cookie: )[^"]*/\1********/g'
+    -e 's/(Cookie: )[^"]*/\1********/g' \
+    -e 's/(--dev-token )[^ ]*/\1********/g' \
+    -e 's/([?&]t=)[^ &"]*/\1********/g'
 }
 
 trace() { # trace <command-line>; goes to stderr so command substitution stays clean
@@ -262,7 +271,9 @@ data-urlencode = \"_sid=${DSM_SID}\"" | curl -sS -k --max-time 8 --config - >/de
   fi
   if [ -n "${LOG_FILE}" ] && [ -f "${LOG_FILE}" ]; then
     esc=$(printf '\033')
-    sed "s/${esc}\[[0-9;]*m//g" "${LOG_FILE}" > "${LOG_FILE}.tmp" 2>/dev/null \
+    # strip ANSI, then mask the dev secret that the on-screen URL shows
+    sed -e "s/${esc}\[[0-9;]*m//g" -e 's/\([?&]t=\)[A-Za-z0-9._-]*/\1********/g' \
+      "${LOG_FILE}" > "${LOG_FILE}.tmp" 2>/dev/null \
       && mv "${LOG_FILE}.tmp" "${LOG_FILE}" || rm -f "${LOG_FILE}.tmp"
   fi
   [ "${DRY_RUN}" -eq 1 ] && return 0
@@ -559,10 +570,9 @@ if [ "${SKIP_SMOKE}" -eq 1 ]; then
   step "4/6  smoke test — skipped"
 else
   step "4/6  smoke test: the binary on the NAS (no install, no nginx change)"
-  why "Runs the real binary on the NAS as your SSH user, on 127.0.0.1:7382."
-  why "An SSH tunnel forwards that loopback port to this machine so you can open"
-  why "http://127.0.0.1:7382/ in a browser and use the terminal."
-  why "Nothing is installed and DSM's nginx is not touched; Ctrl-C is always safe."
+  why "Runs the real binary on the NAS as your SSH user, listening on"
+  why "${SMOKE_BIND}:${SMOKE_PORT}, so you can open the terminal from any machine."
+  why "No SSH tunnel needed. Nothing is installed and DSM's nginx is untouched."
 
   if [ "${DRY_RUN}" -eq 1 ] || confirm "Copy the binary + UI to ${REMOTE_DIR} and run it as ${SSH_USER} on port 7382?"; then
     want_machine="$(expected_machine "${ARCH}")"
@@ -590,42 +600,44 @@ else
     fi
 
     if [ "${smoke_ok}" -eq 1 ]; then
-      launch_out="$(on_nas "HOME='${REMOTE_DIR}' nohup '${REMOTE_DIR}/synoterm' --listen 7382 --auth dev --web-root '${REMOTE_DIR}/web' >'${REMOTE_DIR}/server.log' 2>&1 & echo SYNOTERM_PID=\$!; sleep 1; tail -n 3 '${REMOTE_DIR}/server.log'")"
+      DEV_TOKEN="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+      [ -n "${DEV_TOKEN}" ] || DEV_TOKEN="dev$(date +%s)$$"
+      why "Dev server: no DSM auth, so a random shared secret is required."
+      why "The browser URL carries it as ?t=…; the backend rejects anything else."
+      launch_out="$(on_nas "HOME='${REMOTE_DIR}' nohup '${REMOTE_DIR}/synoterm' --listen ${SMOKE_PORT} --bind ${SMOKE_BIND} --auth dev --dev-token '${DEV_TOKEN}' --web-root '${REMOTE_DIR}/web' >'${REMOTE_DIR}/server.log' 2>&1 & echo SYNOTERM_PID=\$!; sleep 1; tail -n 3 '${REMOTE_DIR}/server.log'")"
       printf '%s\n' "${launch_out}"
       SMOKE_PID="$(printf '%s' "${launch_out}" | sed -n 's/^SYNOTERM_PID=\([0-9]*\)$/\1/p')"
       if [ -n "${SMOKE_PID}" ]; then
-        ok "server pid ${SMOKE_PID}"
+        ok "server pid ${SMOKE_PID} on ${SMOKE_BIND}:${SMOKE_PORT}"
       else
         warn "could not read the server pid from the launch output"
       fi
 
-      if [ "${DRY_RUN}" -eq 0 ]; then
-        note "tunnelling 127.0.0.1:7382 from the NAS to this machine…"
-        trace "ssh -N -L 7382:127.0.0.1:7382 ${TARGET} &"
-        ssh -N "${SSH_OPTS[@]}" -o ExitOnForwardFailure=yes -L "7382:127.0.0.1:7382" "${TARGET}" &
-        TUNNEL_PID=$!
-        attempt=0
-        while [ "${attempt}" -lt 30 ]; do
-          if (exec 3<>/dev/tcp/127.0.0.1/7382) 2>/dev/null; then break; fi
-          attempt=$((attempt + 1))
-          sleep 0.3
-        done
-
-        printf '\n'
-        bold "  Open this in your browser (a real terminal on the NAS):"
-        bold "      http://127.0.0.1:7382/"
-        printf '\n  Automated probe:\n'
-        trace "node tools/ws-test.mjs ws://127.0.0.1:7382/ws --expect SYNOTERM_WS_OK"
-        (cd "${ROOT}" && node tools/ws-test.mjs ws://127.0.0.1:7382/ws --expect SYNOTERM_WS_OK) \
-          || warn "probe failed — see ${REMOTE_DIR}/server.log on the NAS"
-
-        printf '\n  Press Enter when you are done with the browser terminal… '
-        read -r _ || true
-        kill "${TUNNEL_PID}" 2>/dev/null || true
+      SMOKE_URL="http://${NAS}:${SMOKE_PORT}/?t=${DEV_TOKEN}"
+      SMOKE_WS="ws://${NAS}:${SMOKE_PORT}/ws"
+      printf '\n'
+      if [ "${SMOKE_BIND}" = "0.0.0.0" ]; then
+        bold "  Open this from any machine on your LAN:"
+      else
+        bold "  Open this (loopback only — tunnel it yourself):"
       fi
+      bold "      ${SMOKE_URL}"
+      printf '\n'
+      warn "this dev server runs a shell as ${SSH_USER} and has no DSM login;"
+      note "it is reachable from your network until this step stops it, and the"
+      note "secret above is the only thing in front of it."
+
+      printf '\n  Automated probe from this machine:\n'
+      trace "node tools/ws-test.mjs ${SMOKE_WS} --dev-token <secret> --expect SYNOTERM_WS_OK"
+      (cd "${ROOT}" && node tools/ws-test.mjs "${SMOKE_WS}" --dev-token "${DEV_TOKEN}" \
+        --expect SYNOTERM_WS_OK --timeout 15) \
+        || warn "probe failed — see ${REMOTE_DIR}/server.log on the NAS"
+
+      printf '\n  Press Enter when you are done with the browser terminal… '
+      read -r _ || true
 
       if [ -n "${SMOKE_PID:-}" ]; then
-        on_nas "kill ${SMOKE_PID} 2>/dev/null; sleep 1; kill -9 ${SMOKE_PID} 2>/dev/null; echo '  server stopped'"
+        on_nas "kill ${SMOKE_PID} 2>/dev/null; sleep 1; kill -9 ${SMOKE_PID} 2>/dev/null; echo '  dev server stopped'"
       else
         on_nas "pkill -f '${REMOTE_DIR}/synoterm' 2>/dev/null; echo '  server stopped'"
       fi

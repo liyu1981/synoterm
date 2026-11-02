@@ -511,6 +511,13 @@ the exact response body of a rejected upgrade.
 * If DSM sits behind a reverse proxy with its own hostname, `$http_host` is that
   hostname and the check still matches.
 * Uninstalling kills any open shells; warn other administrators first.
+* The smoke test serves a **dev** terminal on `0.0.0.0:7382` so you can open it
+  from a different machine (`http://<nas>:7382/?t=<secret>`). It runs a shell as
+  your SSH user without DSM authentication — the random `?t=` secret is the only
+  guard, and the server is stopped at the end of the step. Use `--loopback` to
+  bind 127.0.0.1 instead.
+* Standalone equivalent: `synoterm --listen 7382 --bind 0.0.0.0 --auth dev
+  --dev-token <secret> --web-root <dir>`.
 
 ## 11. Gotchas worth remembering
 

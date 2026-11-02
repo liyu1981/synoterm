@@ -125,6 +125,8 @@ tools/nas-test.sh nas.local              # ssh user "admin"; asks for the DSM pa
 tools/nas-test.sh nas.local --dry-run    # show the plan, change nothing
 tools/nas-test.sh nas.local --skip-install --yes    # read-only + smoke test only
 tools/nas-test.sh nas.local --trace --log nas.log   # bash/remote tracing + transcript
+tools/nas-test.sh nas.local --smoke-port 8080        # pick the LAN test port
+tools/nas-test.sh nas.local --loopback               # bind 127.0.0.1 instead
 ```
 
 Every command it runs is printed as `+ …` (secrets redacted); `--quiet` hides
@@ -132,10 +134,11 @@ them, `--trace` also enables `set -x` and runs the remote probes with `sh -x`,
 and `--log` writes a shareable transcript with ANSI codes stripped.
 
 It detects the DSM build/architecture, runs the preflight, logs in to DSM to
-probe `authenticate.cgi` (cookie vs token), runs the binary from `/tmp` behind
-an SSH tunnel so you can use the terminal in your browser, then installs the
-right `.spk` for the detected arch and verifies it end to end through nginx,
-TLS, DSM auth and the PTY. `tools/nas-uninstall.sh nas.local` rolls back.
+probe `authenticate.cgi` (cookie vs token), starts the binary on the NAS bound
+to `0.0.0.0` (with a random `?t=` secret) so you can open the terminal from any
+machine — `http://<nas>:7382/?t=…` — then installs the right `.spk` for the
+detected arch and verifies it end to end through nginx, TLS, DSM auth and the
+PTY. `tools/nas-uninstall.sh nas.local` rolls back.
 
 Manual stages, expectations and rollback details:
 [docs/dsm-integration.md §10](docs/dsm-integration.md#10-testing-on-a-real-production-nas).

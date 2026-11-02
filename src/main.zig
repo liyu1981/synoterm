@@ -19,6 +19,11 @@ pub const AuthMode = enum { dev, dsm };
 
 pub const Config = struct {
     bind_port: u16 = 8080,
+    /// IPv4 address to bind. 127.0.0.1 by default; 0.0.0.0 for LAN testing.
+    bind_addr: [4]u8 = .{ 127, 0, 0, 1 },
+    /// Dev mode only: when set, the upgrade must present this secret either as
+    /// `?t=<token>` or as the `synoterm.dev-token.<base64url>` subprotocol.
+    dev_token: ?[]const u8 = null,
     web_root: []const u8 = "frontend/dist",
     auth_mode: AuthMode = .dev,
     /// Group required in DSM mode. DSM administrators are members of
@@ -76,6 +81,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const arg = argv[i];
         if (std.mem.eql(u8, arg, "--listen")) {
             cfg.bind_port = try nextPort(argv, &i);
+        } else if (std.mem.eql(u8, arg, "--bind")) {
+            cfg.bind_addr = parseIpv4(try nextArg(argv, &i)) orelse {
+                std.debug.print("synoterm: --bind needs an IPv4 address (e.g. 0.0.0.0)\n", .{});
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--dev-token")) {
+            cfg.dev_token = try nextArg(argv, &i);
         } else if (std.mem.eql(u8, arg, "--web-root")) {
             cfg.web_root = try nextArg(argv, &i);
         } else if (std.mem.eql(u8, arg, "--auth")) {
@@ -118,15 +130,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var ctx = Ctx{ .allocator = allocator, .cfg = cfg };
 
-    const listen_fd = sys.listenLoopback(cfg.bind_port, 128) catch |err| {
-        std.debug.print("synoterm: cannot listen on 127.0.0.1:{d}: {s}\n", .{ cfg.bind_port, @errorName(err) });
+    const listen_fd = sys.listenIp(cfg.bind_addr, cfg.bind_port, 128) catch |err| {
+        std.debug.print("synoterm: cannot listen on {d}.{d}.{d}.{d}:{d}: {s}\n", .{
+            cfg.bind_addr[0], cfg.bind_addr[1], cfg.bind_addr[2], cfg.bind_addr[3],
+            cfg.bind_port, @errorName(err),
+        });
         return err;
     };
     defer sys.close(listen_fd);
 
-    std.debug.print("synoterm: listening on http://127.0.0.1:{d}/ (auth={s}, euid={d})\n", .{
+    std.debug.print("synoterm: listening on http://{d}.{d}.{d}.{d}:{d}/ (auth={s}, euid={d})\n", .{
+        cfg.bind_addr[0], cfg.bind_addr[1], cfg.bind_addr[2], cfg.bind_addr[3],
         cfg.bind_port, @tagName(cfg.auth_mode), sys.geteuid(),
     });
+    const loopback_only = cfg.bind_addr[0] == 127 and cfg.bind_addr[1] == 0 and
+        cfg.bind_addr[2] == 0 and cfg.bind_addr[3] == 1;
+    if (!loopback_only) {
+        std.debug.print("synoterm: WARNING bound to {d}.{d}.{d}.{d} — reachable from the network\n", .{
+            cfg.bind_addr[0], cfg.bind_addr[1], cfg.bind_addr[2], cfg.bind_addr[3],
+        });
+    }
+    if (cfg.auth_mode == .dev and cfg.dev_token == null and !loopback_only) {
+        std.debug.print("synoterm: WARNING dev mode without --dev-token on a non-loopback address\n", .{});
+    }
 
     while (true) {
         const conn = sys.accept(listen_fd) catch continue;
@@ -152,7 +178,9 @@ fn usage() error{InvalidArguments} {
     std.debug.print(
         \\synoterm - DSM web terminal backend
         \\
-        \\  --listen <port>         loopback port to listen on (default 8080)
+        \\  --listen <port>         port to listen on (default 8080)
+        \\  --bind <ipv4>           address to bind (default 127.0.0.1, 0.0.0.0 = LAN)
+        \\  --dev-token <secret>    dev mode only: require ?t=<secret> or the matching subprotocol
         \\  --web-root <dir>        static files served (dev mode)
         \\  --auth dev|dsm          "dev" trusts the caller, "dsm" requires a DSM session
         \\  --require-group <name>  DSM group required in dsm mode (default: administrators)
@@ -260,27 +288,44 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
         return;
     }
 
-    // --- 2. CSRF token, passed as a WebSocket subprotocol ---
+    // --- 2. subprotocols: CSRF token (dsm) and/or dev shared secret ---
     var selected_protocol: ?[]const u8 = null;
     var syno_token: []const u8 = "";
+    var dev_proto: ?[]const u8 = null;
+    var syno_proto: ?[]const u8 = null;
     if (request.header("Sec-WebSocket-Protocol")) |protocols| {
         var it = std.mem.splitScalar(u8, protocols, ',');
         while (it.next()) |raw| {
             const proto = std.mem.trim(u8, raw, " \t");
             if (std.mem.startsWith(u8, proto, "synoterm.syno-token.")) {
-                selected_protocol = proto;
-                if (decodeBase64Url(allocator, proto["synoterm.syno-token.".len..])) |decoded| {
-                    syno_token = decoded;
+                if (syno_proto == null) {
+                    syno_proto = proto;
+                    if (decodeBase64Url(allocator, proto["synoterm.syno-token.".len..])) |decoded| {
+                        syno_token = decoded;
+                    }
                 }
-                break;
+            } else if (std.mem.startsWith(u8, proto, "synoterm.dev-token.")) {
+                if (dev_proto == null) dev_proto = proto;
             }
         }
     }
+    // RFC 6455: echo exactly one of the offered protocols.
+    selected_protocol = dev_proto orelse syno_proto;
 
     // --- 3. authenticate ---
     var identity = Identity{};
     switch (ctx.cfg.auth_mode) {
-        .dev => {},
+        .dev => {
+            // A dev server may be reachable from the LAN. Require the shared
+            // secret when one is configured, so "dev" is not "wide open".
+            if (ctx.cfg.dev_token) |expected| {
+                const presented = devTokenFromRequest(request, allocator);
+                if (presented == null or !std.mem.eql(u8, presented.?, expected)) {
+                    http.sendError(allocator, fd, 403, "dev token missing or wrong (?t=...)");
+                    return;
+                }
+            }
+        },
         .dsm => {
             var peer_buf: [16]u8 = undefined;
             const peer = sys.peerIp(fd, &peer_buf) orelse "127.0.0.1";
@@ -456,6 +501,46 @@ fn bridgeInput(allocator: std.mem.Allocator, session_ptr: *pty_session.Session, 
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn parseIpv4(text: []const u8) ?[4]u8 {
+    var octets: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, text, '.');
+    var count: usize = 0;
+    while (it.next()) |part| {
+        if (count >= 4) return null;
+        if (part.len == 0 or part.len > 3) return null;
+        octets[count] = std.fmt.parseUnsigned(u8, part, 10) catch return null;
+        count += 1;
+    }
+    if (count != 4) return null;
+    return octets;
+}
+
+/// Dev-mode shared secret: `?t=<token>` or `synoterm.dev-token.<base64url>`.
+fn devTokenFromRequest(request: http.Request, allocator: std.mem.Allocator) ?[]const u8 {
+    if (queryParam(request.query, "t")) |value| {
+        if (value.len > 0) return value;
+    }
+    if (request.header("Sec-WebSocket-Protocol")) |protocols| {
+        var it = std.mem.splitScalar(u8, protocols, ',');
+        while (it.next()) |raw| {
+            const proto = std.mem.trim(u8, raw, " \t");
+            if (std.mem.startsWith(u8, proto, "synoterm.dev-token.")) {
+                return decodeBase64Url(allocator, proto["synoterm.dev-token.".len..]);
+            }
+        }
+    }
+    return null;
+}
+
+fn queryParam(query: []const u8, key: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, query, '&');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair[0..eq], key)) return pair[eq + 1 ..];
+    }
+    return null;
+}
+
 fn originMatchesHost(origin: []const u8, host: []const u8) bool {
     if (origin.len == 0 or host.len == 0) return false;
     const scheme_end = std.mem.indexOf(u8, origin, "://") orelse return false;
@@ -559,6 +644,15 @@ test "json int field" {
     try std.testing.expectEqual(@as(?u16, 120), jsonIntField("{\"type\":\"resize\",\"cols\":120,\"rows\":40}", "cols"));
     try std.testing.expectEqual(@as(?u16, 40), jsonIntField("{\"cols\":120,\"rows\":40}", "rows"));
     try std.testing.expectEqual(@as(?u16, null), jsonIntField("{\"cols\":\"x\"}", "cols"));
+}
+
+test "ipv4 parsing and query params" {
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpv4("0.0.0.0").?);
+    try std.testing.expectEqual([4]u8{ 192, 168, 0, 18 }, parseIpv4("192.168.0.18").?);
+    try std.testing.expectEqual(@as(?[4]u8, null), parseIpv4("192.168.0"));
+    try std.testing.expectEqual(@as(?[4]u8, null), parseIpv4("192.168.0.256"));
+    try std.testing.expectEqualStrings("secret", queryParam("ws=/ws&t=secret", "t").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), queryParam("ws=/ws", "t"));
 }
 
 test "request parsing" {

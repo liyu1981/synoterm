@@ -238,15 +238,27 @@ pub const SockaddrIn = extern struct {
     zero: [8]u8 = @splat(0),
 };
 
-pub fn sockaddrLoopback(port: u16) SockaddrIn {
+pub fn sockaddr(octets: [4]u8, port: u16) SockaddrIn {
+    const host: u32 = (@as(u32, octets[0]) << 24) |
+        (@as(u32, octets[1]) << 16) |
+        (@as(u32, octets[2]) << 8) |
+        @as(u32, octets[3]);
     return .{
         .port_be = std.mem.nativeToBig(u16, port),
-        // 127.0.0.1
-        .addr_be = std.mem.nativeToBig(u32, 0x7f000001),
+        .addr_be = std.mem.nativeToBig(u32, host),
     };
 }
 
+pub fn sockaddrLoopback(port: u16) SockaddrIn {
+    return sockaddr(.{ 127, 0, 0, 1 }, port);
+}
+
 pub fn listenLoopback(port: u16, backlog: u32) Error!fd_t {
+    return listenIp(.{ 127, 0, 0, 1 }, port, backlog);
+}
+
+/// Listens on an arbitrary IPv4 address (0.0.0.0 = all interfaces).
+pub fn listenIp(octets: [4]u8, port: u16, backlog: u32) Error!fd_t {
     const sfd_rc = linux.socket(AF_INET, SOCK.STREAM | SOCK.CLOEXEC, 0);
     if (linux.errno(sfd_rc) != .SUCCESS) return error.SyscallFailed;
     const sfd: fd_t = @intCast(sfd_rc);
@@ -255,7 +267,7 @@ pub fn listenLoopback(port: u16, backlog: u32) Error!fd_t {
     const one: u32 = 1;
     _ = linux.setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, @ptrCast(&one), @sizeOf(u32));
 
-    var addr = sockaddrLoopback(port);
+    var addr = sockaddr(octets, port);
     _ = try okOrErr(linux.bind(sfd, @ptrCast(&addr), @sizeOf(SockaddrIn)));
     _ = try okOrErr(linux.listen(sfd, backlog));
     return sfd;

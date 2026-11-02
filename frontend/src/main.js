@@ -103,12 +103,20 @@ function synoToken() {
   return match ? decodeURIComponent(match[1]) : "";
 }
 
-function synoTokenSubprotocol(token) {
+function base64url(token) {
   const bytes = new TextEncoder().encode(token);
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  const encoded = btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-  return `synoterm.syno-token.${encoded}`;
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function synoTokenSubprotocol(token) {
+  return `synoterm.syno-token.${base64url(token)}`;
+}
+
+/** Dev servers may require a shared secret (?t=… on the page URL). */
+function devToken() {
+  return new URLSearchParams(window.location.search).get("t") || "";
 }
 
 class Session {
@@ -140,13 +148,16 @@ class Session {
   connect() {
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${scheme}//${window.location.host}${wsPath()}`;
+    const protocols = [];
+    const dev = devToken();
+    if (dev) protocols.push(`synoterm.dev-token.${base64url(dev)}`);
     const token = synoToken();
-    const protocols = token ? [synoTokenSubprotocol(token)] : undefined;
+    if (token) protocols.push(synoTokenSubprotocol(token));
 
     this.setState("connecting");
     let socket;
     try {
-      socket = new WebSocket(url, protocols);
+      socket = new WebSocket(url, protocols.length > 0 ? protocols : undefined);
     } catch (err) {
       this.fail(err);
       return;
