@@ -5,7 +5,7 @@
       "title": "Terminal",
       "desc": "An interactive, multi-tab terminal for DSM.",
       "icon": "images/icon_{0}.png",
-      "url": "webman/3rdparty/synoterm/web/index.html",
+      "url": "3rdparty/synoterm/web/index.html",
       "allUsers": false
     }
   }

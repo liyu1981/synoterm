@@ -402,6 +402,12 @@ data-urlencode = \"_sid=${DSM_SID}\"" | curl -sS -k --max-time 10 --config - >/d
 # ------------------------------------------------------------------ build --
 nas_build_number() {
   local n
+  # A dirty tree means "still iterating": DSM refuses to reinstall the same
+  # version, so use a value that changes on every run instead.
+  if [ -n "$(git -C "${ROOT}" status --porcelain 2>/dev/null)" ]; then
+    date +%y%m%d%H%M
+    return
+  fi
   n="$(git -C "${ROOT}" rev-list --count HEAD 2>/dev/null || true)"
   case "${n}" in
     ''|*[!0-9]*) n="$(date +%y%m%d%H%M)" ;;
@@ -449,16 +455,39 @@ nas_install_spk() { # nas_install_spk <spk-file>
   fi
   ok "installer: ${synopkg}"
 
-  if on_nas_root "${synopkg} install '${remote_spk}'"; then
+  local install_out install_status
+  install_out="$(on_nas_root "${synopkg} install '${remote_spk}'" 2>&1)"
+  install_status=$?
+  printf '%s\n' "${install_out}" | sed 's/^/  /'
+  if [ "${install_status}" -eq 0 ] && ! printf '%s' "${install_out}" | grep -q '"success":false'; then
     ok "package install command succeeded"
   else
-    case $? in
-      127) fail "could not execute ${synopkg}" ;;
-      *) warn "the installer reported an error — read its output above" ;;
+    case "${install_out}" in
+      *"non-synology-signed package should not use internal worker"*|*'"code":320'*)
+        # DSM 7 blocks unsigned packages on the CLI ("internal worker") by
+        # design; Package Center is the *external* worker and does allow them.
+        fail "DSM refuses CLI installs of unsigned packages (error 320)"
+        note "this is a DSM 7 platform restriction, not a problem with the .spk:"
+        note "  synopkg is the 'internal worker' and only accepts Synology-signed packages"
+        note ""
+        note "install it once through the desktop UI instead:"
+        note "  1. Package Center → Settings → General → Trust Level →"
+        note "     \"Synology Inc. and trusted publishers\" → allow any publisher"
+        note "  2. Package Center → Manual Install → choose"
+        note "       $(basename "${spk_file}")   (in ${ROOT}/build)"
+        note "  3. re-run:  tools/nas-install.sh ${NAS} --user ${SSH_USER} --verify-only"
+        return 1
+        ;;
+      *)
+        case "${install_status}" in
+          127) fail "could not execute ${synopkg}" ;;
+          *) warn "the installer reported an error — read its output above" ;;
+        esac
+        note "common causes: Package Center trust level still blocks unsigned"
+        note "packages, or an older version is installed (uninstall first)"
+        return 1
+        ;;
     esac
-    note "common causes: Package Center trust level still blocks unsigned"
-    note "packages, or an older version is installed (uninstall first)"
-    return 1
   fi
   on_nas "rm -f '${remote_spk}'"
 }
@@ -483,23 +512,37 @@ nas_verify_install() { # nas_verify_install [end-to-end-ws-probe]
   on_nas "echo '  server log:'; tail -n 5 /var/packages/synoterm/var/runtime/synoterm.log 2>&1 | sed 's/^/    /'"
   warn "the setuid line must start with -rwsr-x--- root package"
 
+  # Default package: no DSM worker, the terminal listens on its own port.
   local health
-  health="$(curl -sS -k --max-time 8 "https://${NAS}:${DSM_PORT}/synoterm/healthz" 2>&1 || true)"
+  health="$(curl -sS --max-time 8 "http://${NAS}:7381/healthz" 2>&1 || true)"
   case "${health}" in
-    *'"ok":true'*) ok "installed server answers /synoterm/healthz: $(printf '%s' "${health}" | tr -d '\n')" ;;
-    404*|*'"code":404'*|"")
-      warn "the installed package does not answer /synoterm/healthz"
-      note "an older build is probably still installed; uninstall and re-run:"
-      note "  tools/nas-uninstall.sh ${NAS} --user ${SSH_USER}"
+    *'"ok":true'*) ok "installed server answers http://${NAS}:7381/healthz: $(printf '%s' "${health}" | tr -d '\n')" ;;
+    "")
+      warn "the installed server does not answer on port 7381"
+      note "check the log above; a firewall rule may be blocking the port:"
+      note "  Control Panel → Security → Firewall → allow TCP 7381 from your LAN"
       ;;
-    *) warn "could not verify the installed build: $(printf '%s' "${health}" | head -c 200)" ;;
+    *)
+      # Fall back to the proxied path in case this build uses the nginx mount.
+      local proxied
+      proxied="$(curl -sS -k --max-time 8 "https://${NAS}:${DSM_PORT}/synoterm/healthz" 2>&1 || true)"
+      case "${proxied}" in
+        *'"ok":true'*) ok "installed server answers /synoterm/healthz: $(printf '%s' "${proxied}" | tr -d '\n')" ;;
+        *) warn "could not verify the installed build: $(printf '%s' "${health}" | head -c 200)" ;;
+      esac
+      ;;
   esac
 
+  on_nas "echo '  package info:'; cat /var/packages/synoterm/INFO 2>/dev/null | head -n 4 | sed 's/^/    /' || true"
+
   if [ "${probe}" = "yes" ] && [ -n "${COOKIE_HEADER:-}" ]; then
-    trace "node tools/ws-test.mjs wss://${NAS}:${DSM_PORT}/synoterm/ws --cookie id=******** --insecure"
-    (cd "${ROOT}" && node tools/ws-test.mjs "wss://${NAS}:${DSM_PORT}/synoterm/ws" \
+    # Same request the browser makes: DSM-served page on :5000 → terminal on
+    # :7381 of the same host, carrying the (host-scoped) DSM cookie + token.
+    trace "node tools/ws-test.mjs ws://${NAS}:7381/ws --cookie id=******** --token … --origin http://${NAS}:${DSM_PORT}"
+    (cd "${ROOT}" && node tools/ws-test.mjs "ws://${NAS}:7381/ws" \
       --cookie "${COOKIE_HEADER}" ${DSM_TOKEN:+--token "${DSM_TOKEN}"} \
-      --insecure --expect SYNOTERM_DSM_OK --timeout 15) ||
+      --origin "http://${NAS}:${DSM_PORT}" \
+      --expect SYNOTERM_DSM_OK --timeout 15) ||
       warn "end-to-end probe failed — the HTTP status hint above says why"
   fi
 }

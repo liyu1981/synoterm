@@ -9,6 +9,14 @@
 # Env:
 #   SYNOTERM_OS_MIN_VER  override os_min_ver (default: 7.1-42661)
 #     e.g. SYNOTERM_OS_MIN_VER=7.1-42218 for a NAS on an older 7.1 build
+#   SYNOTERM_NGINX_MOUNT  0 | 1  (default: 0)
+#     1 — ship conf/resource + the nginx snippet so DSM itself mounts
+#         /synoterm/ (same-origin, no extra port). This uses an *internal
+#         worker*, which DSM 7 only allows for Synology-signed packages, so it
+#         is off by default: a self-built package is refused with
+#         "non-synology-signed package should not use internal worker".
+#     0 — no privileged resource at all: DSM serves the UI from ui/web and the
+#         terminal talks to the package's own port (see docs/dsm-integration.md).
 #   SYNOTERM_UI_STYLE  url | vue   (default: url)
 #     url — documented `.url` registration; works on DSM 7.0/7.1/7.2 and opens
 #           the app URL in a DSM-managed window. No SynoToken injection.
@@ -36,6 +44,8 @@ case "${ARCH}" in
 esac
 
 OS_MIN_VER="${SYNOTERM_OS_MIN_VER:-7.1-42661}"
+NGINX_MOUNT="${SYNOTERM_NGINX_MOUNT:-0}"
+case "${NGINX_MOUNT}" in 0|1) ;; *) echo "SYNOTERM_NGINX_MOUNT must be 0 or 1" >&2; exit 2 ;; esac
 UI_STYLE="${SYNOTERM_UI_STYLE:-url}"
 case "${UI_STYLE}" in
   url|vue) ;;
@@ -65,20 +75,29 @@ fi
 
 echo "==> staging"
 rm -rf "${STAGING}"
-mkdir -p "${PAYLOAD}/bin" "${PAYLOAD}/nginx" "${PAYLOAD}/ui/web" "${PAYLOAD}/ui/images"
+mkdir -p "${PAYLOAD}/bin" "${PAYLOAD}/ui/web" "${PAYLOAD}/ui/images"
 
 cp "${BUILD}/bin-${ARCH}/bin/synoterm" "${PAYLOAD}/bin/synoterm"
 chmod 755 "${PAYLOAD}/bin/synoterm"
 
-cp "${ROOT}/packaging/dsm7/nginx/synoterm.conf" "${PAYLOAD}/nginx/synoterm.conf"
+# Always ship the snippet + root helper: without the privileged worker the mount
+# is applied by hand (contrib/README.md).
+cp -R "${ROOT}/packaging/dsm7/contrib" "${PAYLOAD}/contrib"
+if [ "${NGINX_MOUNT}" = "1" ]; then
+  mkdir -p "${PAYLOAD}/nginx"
+  cp "${ROOT}/packaging/dsm7/contrib/nginx/synoterm.conf" "${PAYLOAD}/nginx/synoterm.conf"
+fi
 cp "${ROOT}/packaging/dsm7/ui/config.${UI_STYLE}" "${PAYLOAD}/ui/config"
 if [ "${UI_STYLE}" = "vue" ]; then
   cp "${ROOT}/packaging/dsm7/ui/Synoterm.js" "${PAYLOAD}/ui/Synoterm.js"
 fi
 cp "${ROOT}"/frontend/dist/* "${PAYLOAD}/ui/web/"
-# The UI is served from /webman/3rdparty/synoterm/web/ while the WebSocket
-# lives behind the nginx mount, so tell the bundle where that is.
-printf 'window.SYNOTERM_CONFIG = { ws: "/synoterm/ws" };\n' > "${PAYLOAD}/ui/web/config.js"
+# Tell the bundle where the backend is. It cannot be derived from the page URL:
+# with the package the page is served by DSM (/webman/3rdparty/synoterm/web/)
+# while the terminal listens on its own port of the same host.
+# The UI prefers the same-origin mount when it answers and falls back to the
+# package's own port, so one bundle works with and without the manual step.
+printf 'window.SYNOTERM_CONFIG = { proxy: "/synoterm", port: 7381 };\n' > "${PAYLOAD}/ui/web/config.js"
 
 python3 "${ROOT}/tools/make-icons.py" "${PAYLOAD}/ui/images" >/dev/null
 python3 "${ROOT}/tools/make-icons.py" "${STAGING}/icons" >/dev/null
@@ -87,6 +106,10 @@ cp "${STAGING}/icons/icon_256.png" "${STAGING}/PACKAGE_ICON_256.PNG"
 rm -rf "${STAGING}/icons"
 
 cp -R "${ROOT}/packaging/dsm7/conf" "${STAGING}/conf"
+if [ "${NGINX_MOUNT}" = "0" ]; then
+  # No privileged resource: nothing for DSM's internal workers to do.
+  rm -f "${STAGING}/conf/resource"
+fi
 cp -R "${ROOT}/packaging/dsm7/scripts" "${STAGING}/scripts"
 chmod 755 "${STAGING}"/scripts/*
 
@@ -108,6 +131,10 @@ sed \
   -e "s|@SUPPORT_URL@|${SUPPORT_URL}|g" \
   "${ROOT}/packaging/dsm7/INFO.template" > "${STAGING}/INFO"
 
+if [ "${NGINX_MOUNT}" = "0" ]; then
+  sed -i '/instuninst_restart_services/d' "${STAGING}/INFO"
+fi
+
 echo "==> package.tgz"
 ( cd "${PAYLOAD}" && tar -czf "${STAGING}/package.tgz" --format=ustar --owner=0 --group=0 $(ls -A | sort) )
 
@@ -115,5 +142,5 @@ echo "==> ${OUT}"
 ( cd "${STAGING}" && tar -cf "${OUT}" --format=ustar --owner=0 --group=0 \
     INFO package.tgz scripts conf LICENSE PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG )
 
-echo "ui style: ${UI_STYLE}, os_min_ver: ${OS_MIN_VER}"
+echo "ui style: ${UI_STYLE}, os_min_ver: ${OS_MIN_VER}, nginx mount: ${NGINX_MOUNT}"
 ls -lh "${OUT}"

@@ -168,9 +168,13 @@ Details and file contents: [dsm-integration.md](dsm-integration.md).
    entry (`user: root`, `permission: 4750`) is how a package gets one setuid
    helper without running as root. Everything else stays unprivileged.
 3. **Web transport.** `conf/resource` → `web-config` → `nginx-static-config`
-   with `type: "dsm"`, an nginx snippet `relpath`, a loopback `port`, and an
-   `alias` — DSM mounts `location ^~ /<alias>/` and reloads nginx
-   (`instuninst_restart_services="nginx.service"`).
+   mounts `/synoterm/` inside DSM's nginx — but that is an **internal worker**,
+   which DSM 7 only allows for Synology-signed packages (verified on a DS218+:
+   error 320 `non-synology-signed package should not use internal worker`). The
+   default build therefore ships **no** `conf/resource`: DSM serves the UI from
+   `ui/web` and the terminal listens on its own port, with the DSM cookie
+   reaching it because cookies are host-scoped. `SYNOTERM_NGINX_MOUNT=1` keeps
+   the mount for signed builds.
 4. **Desktop app.** Two documented registrations exist: `.url` with
    `type: "url"` + a relative `url` (used by default here, 7.x-safe) and the
    7.2 Vue form where `ui/config` maps a JS file to a class

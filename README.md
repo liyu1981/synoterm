@@ -30,9 +30,13 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
   and it breaks for 2FA/LDAP accounts. Instead, the backend asks DSM who the
   browser session belongs to (`authenticate.cgi`) and forks a PTY **as that
   user** — the same thing DSM's own terminal tooling does.
-* **No extra port.** DSM's nginx proxies `/synoterm/` to the loopback
-  listener, so the terminal is same-origin, TLS-terminated by DSM, and covered
-  by DSM's firewall rules.
+* **No internal worker — the mount ships as files.** DSM 7 refuses to let an
+  unsigned package use DSM's nginx (error 320 `not use internal worker`), so the
+  package ships the snippet plus a root helper and you apply it once:
+  `sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh`. It is
+  validated with `nginx -t` and rolled back on failure. Without it the app still
+  works in direct mode (`http://nas:7381`), since the DSM cookie is host-scoped.
+  See [docs/dsm-integration.md §4](docs/dsm-integration.md#4-transport-ship-the-mount-apply-it-by-hand).
 * **One static binary.** Zig cross-compiles to `x86_64`/`aarch64`/`armv7`
   **static musl** binaries; libc is embedded, so the binary does not depend on
   DSM's glibc (7.1 ships 2.26, while a native build needs 2.36+). No Node.js, no

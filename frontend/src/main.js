@@ -86,17 +86,95 @@ function appBase() {
 }
 
 /**
- * WebSocket path resolution order:
- *   1. window.SYNOTERM_CONFIG.ws  (written by the packaging step)
- *   2. ?ws=…                     (injected by the DSM 7.2 Vue wrapper)
- *   3. derived from the page URL (dev server)
+ * Where the terminal backend lives.
+ *
+ * With the DSM package the UI is served by DSM (same origin, so the DSM session
+ * cookie is available and the SynoToken can be read from the desktop), while the
+ * backend listens on its own port. Cookies are host-scoped rather than
+ * port-scoped, so the browser adds the DSM session cookie to the cross-port
+ * request — no reverse proxy and no extra login are needed.
+ *
+ * Resolution order:
+ *   1. window.SYNOTERM_CONFIG.port  → http(s)://<same host>:<port>
+ *   2. window.SYNOTERM_CONFIG.ws    → explicit websocket URL/path
+ *   3. ?ws=…                        (injected by the DSM 7.2 Vue wrapper)
+ *   4. derived from the page URL    (dev server, same origin)
  */
-function wsPath() {
-  const configured = window.SYNOTERM_CONFIG && window.SYNOTERM_CONFIG.ws;
-  if (typeof configured === "string" && configured.length > 0) return configured;
+let backend = null; // { base, mode }
+
+/**
+ * Picks the backend endpoint once, then caches it.
+ *
+ * The package can be reached two ways:
+ *   1. same-origin through DSM's nginx mount (/synoterm/), applied by hand with
+ *      contrib/install-nginx-mount.sh  — preferred: cookies, HTTPS, no extra port
+ *   2. directly on the package's own port (http://nas:7381/) — works without any
+ *      DSM configuration, but the page must come from DSM (or the same host)
+ *
+ * A cheap same-origin probe of <proxy>/healthz decides which is available; the
+ * result is only a transport choice, authentication is unchanged either way.
+ */
+async function resolveBackend() {
+  if (backend) {
+    window.synotermBackend = backend; // handy in the browser console / support
+    return backend;
+  }
+  const config = window.SYNOTERM_CONFIG || {};
+  const proxy = typeof config.proxy === "string" ? config.proxy.replace(/\/$/, "") : "";
+
+  // Already talking to our own server? Then stay same-origin.
+  if (Number.isFinite(config.port) && String(config.port) === window.location.port) {
+    backend = { base: window.location.origin + appBase(), mode: "direct" };
+    window.synotermBackend = backend;
+    return backend;
+  }
+
+  if (proxy) {
+    try {
+      const response = await fetch(`${proxy}/healthz`, { credentials: "same-origin", cache: "no-store" });
+      if (response.ok) {
+        backend = { base: proxy, mode: "proxy" };
+        window.synotermBackend = backend;
+        return backend;
+      }
+    } catch {
+      /* no mount: fall through to the package's own port */
+    }
+  }
+
+  if (typeof config.base === "string" && config.base.length > 0) {
+    backend = { base: config.base, mode: "config" };
+    window.synotermBackend = backend;
+    return backend;
+  }
+  if (Number.isFinite(config.port) && config.port > 0) {
+    backend = {
+      base: `${window.location.protocol}//${window.location.hostname}:${config.port}`,
+      mode: "direct",
+    };
+    window.synotermBackend = backend;
+    return backend;
+  }
+  backend = { base: window.location.origin + appBase(), mode: "same-origin" };
+  window.synotermBackend = backend;
+  return backend;
+}
+
+function backendBase() {
+  return backend ? backend.base : window.location.origin + appBase();
+}
+
+function wsUrl() {
+  const config = window.SYNOTERM_CONFIG || {};
+  if (typeof config.ws === "string" && config.ws.length > 0) {
+    return config.ws.startsWith("ws://") || config.ws.startsWith("wss://")
+      ? config.ws
+      : `${backendBase()}${config.ws}`;
+  }
   const injected = new URLSearchParams(window.location.search).get("ws");
-  if (injected) return injected;
-  return `${appBase()}/ws`;
+  if (injected) return `${window.location.origin}${injected}`;
+  const base = backendBase();
+  return base.replace(/^http/, "ws") + "/ws";
 }
 
 /**
@@ -108,8 +186,7 @@ function wsPath() {
  * 404 exactly where it was most needed.
  */
 function apiPath(name) {
-  const base = wsPath().replace(/\/ws$/, "");
-  return `${base}/${name}`;
+  return `${backendBase()}/${name}`;
 }
 
 /**
@@ -259,8 +336,8 @@ class Session {
   }
 
   async openSocket() {
-    const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${scheme}//${window.location.host}${wsPath()}`;
+    await resolveBackend();
+    const url = wsUrl();
     const protocols = [];
     const dev = devToken();
     if (dev) protocols.push(`synoterm.dev-token.${base64url(dev)}`);

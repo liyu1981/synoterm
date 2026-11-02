@@ -93,57 +93,80 @@ Notes:
 Do **not** set `"run-as": "root"`: it would give the whole package root, which
 is unnecessary and vastly increases the blast radius.
 
-## 4. `conf/resource` — nginx mount (the WebSocket path)
+## 4. Transport: ship the mount, apply it by hand
+
+DSM 7 only lets **Synology-signed** packages use its *internal workers*, and
+`conf/resource` is exactly that. Shipping the nginx mount in `conf/resource`
+makes the package uninstallable:
 
 ```json
-{
-  "web-config": {
-    "nginx-static-config": {
-      "enable": [
-        {
-          "type": "dsm",
-          "relpath": "nginx/synoterm.conf",
-          "ports": [{ "port": 7381, "protocol": "tcp", "schema": "http" }],
-          "alias": ["synoterm"]
-        }
-      ]
-    }
-  }
-}
+{"error":{"code":320,"description":"non-synology-signed package should not use internal worker"}}
 ```
 
-DSM copies the snippet into its nginx configuration and reloads nginx; the
-snippet's own `location ^~ /synoterm/` block does the proxying:
+So the package ships the mount **as files** and the mount is applied once, by
+you, with root over SSH:
 
-```nginx
-location ^~ /synoterm/ {
-    access_log off;
-    proxy_pass http://127.0.0.1:7381;
-    proxy_http_version 1.1;
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-    proxy_buffering off;
-}
+```sh
+sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh
 ```
 
-Why this matters:
+What that script does (`contrib/install-nginx-mount.sh`):
 
-* **Same origin** (`https://nas:5001/synoterm/…`) → no mixed-content block on
-  `wss://`, no CORS, cookies and the DSM token are sent automatically.
-* **No firewall change**: only `127.0.0.1:7381` is bound.
-* `proxy_buffering off` is what makes keystroke round-trips feel local;
-  `proxy_read_timeout` keeps idle terminals alive.
-* **to verify:** the exact `web-config` schema on DSM 7.1 (documented for
-  Web Station "web service" resources; DiskShell ships this form on 7.2).
+1. finds a directory nginx already includes **inside a `server { }` block**
+   (`include …/www.*.conf;` → it writes `www.synoterm.conf` so the pattern
+   matches), or, if there is none, writes
+   `/usr/local/etc/nginx/conf.d/synoterm.conf` and prints the one-line edit;
+2. runs `nginx -t` and **removes the file again if nginx rejects it** — a broken
+   snippet can never take the DSM UI down;
+3. restarts nginx (`synosystemctl restart nginx`, with fallbacks);
+4. probes `http://127.0.0.1:7381/healthz` and
+   `https://127.0.0.1:5001/synoterm/healthz`.
 
-Escape hatch if a DSM update breaks the mount: expose the loopback port through
-*Control Panel → Login Portal → Advanced → Reverse Proxy* with
-`https://nas:5001/synoterm → http://127.0.0.1:7381`.
+Undo: `sudo /var/packages/synoterm/target/contrib/uninstall-nginx-mount.sh`.
+
+### 4.1 Both transports work, the UI picks one
+
+```
+mode "proxy"  (mount applied — preferred)
+  https://nas:5001/synoterm/…            UI + WSS, same origin, cookies, no extra port
+      └─ nginx location ^~ /synoterm/ → 127.0.0.1:7381
+
+mode "direct" (no mount)
+  http://nas:5000/webman/3rdparty/synoterm/web/   UI served by DSM's webman
+      └─ ws://nas:7381/ws                         own port; the DSM cookie is sent
+                                                  anyway (cookies are host-scoped)
+```
+
+`ui/web/config.js` carries both (`{ proxy: "/synoterm", port: 7381 }`) and the
+bundle probes `<proxy>/healthz` once, then caches the choice; the current mode is
+visible in the browser console as `window.synotermBackend`.
+
+Notes:
+
+* `synoterm` runs with `--base-path /synoterm` but *also* answers on `/`, so one
+  process serves both modes.
+* **Direct mode is HTTP-only in practice.** If DSM is served over HTTPS, an
+  `https://` page cannot open `ws://`, so apply the mount (or configure DSM's own
+  reverse proxy, §4.2).
+* **Direct mode needs the port reachable** from the browser: allow TCP 7381 in
+  *Control Panel → Security → Firewall*.
+* The mount avoids both problems: same origin, TLS by DSM, no extra port.
+
+### 4.2 Same thing without the helper script
+
+*Control Panel → Login Portal → Advanced → Reverse Proxy → Create*: source
+`HTTPS`, host `nas`, port `5001`, path `/synoterm`; destination `HTTP`,
+host `localhost`, port `7381`. That is DSM's own feature, no worker involved —
+the shipped snippet and this rule are equivalent.
+
+### 4b. For signed packages: automatic mount
+
+```sh
+SYNOTERM_NGINX_MOUNT=1 ./tools/build-spk.sh x86_64 0.1.0-1
+```
+
+That build adds `conf/resource` (DSM applies the mount itself through its
+internal worker) and is only installable if the package is signed by Synology.
 
 ## 5. `ui/` — desktop application
 
@@ -153,6 +176,7 @@ Two registrations are supported. The build picks one with
 | Style | Files | DSM versions | `SynoToken` |
 | --- | --- | --- | --- |
 | `url` (default, and always used on 7.0/7.1) | `ui/config.url` → `ui/config` | documented for 7.x, safe for the **7.1 floor** | not injected; the UI extracts the token from the same-origin DSM desktop (§5.3) |
+| (default URL value) | `3rdparty/synoterm/web/index.html` | relative to `/webman/`, per Synology's example | — |
 | `vue` | `ui/config.vue` + `ui/Synoterm.js` | DSM **7.2+** desktop framework | DSM appends `?SynoToken=` to the wrapper script, which forwards it |
 
 ### 5.1 `url` style (default, 7.1-safe)
@@ -348,6 +372,21 @@ HOME="${SYNOPKG_PKGVAR}/home" nohup "${SYNOPKG_PKGDEST}/bin/synoterm" \
 
 ## 8. Installing an unsigned SPK
 
+> **DSM 7 blocks unsigned packages on the CLI, by design.** `synopkg install` is
+> the *internal worker* and answers:
+>
+> ```json
+> {"results":[{"action":"install","error":{"code":320,
+>   "description":"non-synology-signed package should not use internal worker"}}],
+>  "success":false}
+> ```
+>
+> Package Center is the *external* worker and does allow unsigned packages, so
+> the install has to go through the desktop UI (or a signed package). There is
+> no supported CLI flag for this. `tools/nas-install.sh` recognises error 320 and
+> prints the exact steps; afterwards run it with `--verify-only` to check the
+> result (and to run the end-to-end probe with your DSM session).
+
 DSM 7 verifies package signatures by default. For an unsigned build:
 
 1. **Package Center → Settings → General → Trust Level → "Synology Inc. and
@@ -358,6 +397,17 @@ DSM 7 verifies package signatures by default. For an unsigned build:
 3. If DSM reports `arch` mismatch, confirm the NAS architecture in
    *Control Panel → Info Center* (`x86_64`, `armv8`, `armv7`) and use the
    matching build.
+4. Verify what got installed, and probe the terminal end to end:
+
+   ```sh
+   tools/nas-install.sh 192.168.0.18 --user yli --verify-only
+   ```
+
+   That logs in, checks `synopkg status`, the setuid mode, the nginx mount,
+   `/synoterm/healthz` and a real `wss://` connection with your session.
+
+Uninstalling has the same worker restriction on some builds — use
+*Package Center → Uninstall* if `synopkg uninstall` refuses.
 
 ## 9. Device verification checklist (M1)
 

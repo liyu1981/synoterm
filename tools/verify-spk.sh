@@ -21,7 +21,7 @@ check() {
 }
 
 echo "spk: ${SPK}"
-for path in INFO package.tgz scripts/start-stop-status conf/privilege conf/resource LICENSE PACKAGE_ICON.PNG; do
+for path in INFO package.tgz scripts/start-stop-status conf/privilege LICENSE PACKAGE_ICON.PNG; do
   check "${path}"
 done
 
@@ -36,7 +36,8 @@ tar -xzf "${WORK}/package.tgz" -C "${WORK}/.." --one-top-level="${WORK}/payload"
   mkdir -p "${WORK}/payload"
   tar -xzf "${WORK}/package.tgz" -C "${WORK}/payload"
 }
-for path in bin/synoterm nginx/synoterm.conf ui/config ui/images/icon_48.png ui/web/index.html ui/web/app.js ui/web/icon.svg; do
+for path in bin/synoterm ui/config ui/images/icon_48.png ui/web/index.html ui/web/app.js ui/web/icon.svg ui/web/config.js \
+            contrib/README.md contrib/install-nginx-mount.sh contrib/uninstall-nginx-mount.sh contrib/nginx/synoterm.conf; do
   if [ -e "${WORK}/payload/${path}" ]; then
     echo "  ok   payload/${path}"
   else
@@ -109,6 +110,21 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$(dirname "$SPK")/../assets/icon.
     fail=1
   fi
   rm -rf "${tmp_icons}"
+fi
+
+# The nginx mount is optional: only Synology-signed packages may use DSM's
+# internal workers, so a self-built package must not ship conf/resource.
+if [ -e "${WORK}/conf/resource" ]; then
+  echo "  ok   conf/resource (privileged nginx mount — only installable when signed)"
+  [ -e "${WORK}/payload/nginx/synoterm.conf" ] || { echo "  MISS payload/nginx/synoterm.conf"; fail=1; }
+  grep -q 'ws: "/synoterm/ws"' "${WORK}/payload/ui/web/config.js" || {
+    echo "  FAIL nginx-mount build must point the UI at /synoterm/ws"; fail=1; }
+else
+  echo "  ok   no conf/resource (no internal worker)"
+  grep -q 'port:' "${WORK}/payload/ui/web/config.js" || {
+    echo "  FAIL ui/web/config.js needs the direct port as a fallback"; fail=1; }
+  grep -q 'proxy:' "${WORK}/payload/ui/web/config.js" || {
+    echo "  FAIL ui/web/config.js needs the /synoterm proxy path to prefer the mount"; fail=1; }
 fi
 
 # The setuid tool must be declared with the same path the payload ships.

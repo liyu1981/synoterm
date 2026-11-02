@@ -234,16 +234,24 @@ fn handleConnection(ctx: *Ctx, fd: sys.fd_t) void {
         return;
     };
 
+    // The UI may be served by DSM on another port of the same host; a
+    // same-host cross-port fetch is still a CORS request, so /status and
+    // /healthz echo the validated origin. WebSockets are not subject to CORS.
+    const cors_headers = corsHeaders(allocator, request, false) catch "";
+
     if (std.mem.eql(u8, rel_path, "/healthz")) {
         var body: [96]u8 = undefined;
         const json = std.fmt.bufPrint(&body, "{{\"ok\":true,\"version\":\"{s}\",\"api\":{d}}}\n", .{
             server_version, api_version,
         }) catch "{\"ok\":true}\n";
+        var headers = util.List(u8).init(allocator);
+        defer headers.deinit();
+        headers.appendFmt("Cache-Control: no-store\r\n{s}", .{cors_headers}) catch {};
         http.send(allocator, fd, .{
             .status = 200,
             .content_type = "application/json; charset=utf-8",
             .body = json,
-            .extra_headers = "Cache-Control: no-store\r\n",
+            .extra_headers = headers.items(),
         }) catch {};
         return;
     }
@@ -266,7 +274,20 @@ fn handleConnection(ctx: *Ctx, fd: sys.fd_t) void {
 /// Explains *why* a terminal connection would be refused. The browser cannot
 /// read the status of a failed WebSocket handshake, so the UI calls this first
 /// and can show "test token is stale" instead of an endless retry loop.
+/// CORS headers for the control endpoints, but only for an origin that passes
+/// the same host check as the WebSocket upgrade.
+fn corsHeaders(allocator: std.mem.Allocator, request: http.Request, credentials: bool) ![]const u8 {
+    const origin = request.header("Origin") orelse return "";
+    const host = request.header("Host") orelse return "";
+    if (!originMatchesHost(origin, host)) return "";
+    if (credentials) {
+        return std.fmt.allocPrint(allocator, "Access-Control-Allow-Origin: {s}\r\nAccess-Control-Allow-Credentials: true\r\nVary: Origin\r\n", .{origin});
+    }
+    return std.fmt.allocPrint(allocator, "Access-Control-Allow-Origin: {s}\r\nVary: Origin\r\n", .{origin});
+}
+
 fn serveStatus(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: http.Request) void {
+    const cors = corsHeaders(allocator, request, true) catch "";
     const access = checkAccess(ctx, allocator, fd, request, false) catch {
         http.sendError(allocator, fd, 500, "authorization failed");
         return;
@@ -279,11 +300,14 @@ fn serveStatus(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: h
                 "{{\"ok\":false,\"code\":{d},\"reason\":\"{s}\"}}\n",
                 .{ denied.code, denied.reason },
             ) catch return;
+            var headers = util.List(u8).init(allocator);
+            defer headers.deinit();
+            headers.appendFmt("Cache-Control: no-store\r\n{s}", .{cors}) catch {};
             http.send(allocator, fd, .{
                 .status = denied.code,
                 .content_type = "application/json; charset=utf-8",
                 .body = body.items(),
-                .extra_headers = "Cache-Control: no-store\r\n",
+                .extra_headers = headers.items(),
             }) catch {};
         },
         .allowed => |identity| {
@@ -300,11 +324,14 @@ fn serveStatus(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: h
                     api_version,
                 },
             ) catch return;
+            var headers = util.List(u8).init(allocator);
+            defer headers.deinit();
+            headers.appendFmt("Cache-Control: no-store\r\n{s}", .{cors}) catch {};
             http.send(allocator, fd, .{
                 .status = 200,
                 .content_type = "application/json; charset=utf-8",
                 .body = body.items(),
-                .extra_headers = "Cache-Control: no-store\r\n",
+                .extra_headers = headers.items(),
             }) catch {};
         },
     }
@@ -316,14 +343,17 @@ fn isWebSocketUpgrade(request: http.Request) bool {
     return std.ascii.eqlIgnoreCase(upgrade, "websocket");
 }
 
-/// Strips the nginx mount prefix; returns null when the request is outside it.
+/// Strips the nginx mount prefix when present. A request outside the mount is
+/// passed through unchanged, so the same process serves both
+///   https://nas:5001/synoterm/…  (DSM nginx proxy, mounted by hand)
+///   http://nas:7381/…            (direct, no proxy)
 fn stripBasePath(path: []const u8, base_path: []const u8) ?[]const u8 {
     const base = std.mem.trimEnd(u8, base_path, "/");
     if (base.len == 0) return path;
-    if (!std.mem.startsWith(u8, path, base)) return null;
+    if (!std.mem.startsWith(u8, path, base)) return path;
     const rest = path[base.len..];
     if (rest.len == 0) return "/";
-    if (rest[0] != '/') return null;
+    if (rest[0] != '/') return path;
     return rest;
 }
 
@@ -663,12 +693,30 @@ fn requestIsSameOrigin(request: http.Request, host: []const u8) bool {
     return false;
 }
 
+fn hostWithoutPort(value: []const u8) []const u8 {
+    // IPv6 literals keep their brackets; strip "]:port" as well.
+    if (std.mem.lastIndexOfScalar(u8, value, ':')) |colon| {
+        const after = value[colon + 1 ..];
+        const is_port = after.len > 0 and std.mem.indexOfScalar(u8, value, ']') == null;
+        if (is_port) return value[0..colon];
+    }
+    return value;
+}
+
 fn originMatchesHost(origin: []const u8, host: []const u8) bool {
     if (origin.len == 0 or host.len == 0) return false;
     const scheme_end = std.mem.indexOf(u8, origin, "://") orelse return false;
     const after_scheme = origin[scheme_end + 3 ..];
     const end = std.mem.indexOfScalar(u8, after_scheme, '/') orelse after_scheme.len;
-    return std.ascii.eqlIgnoreCase(after_scheme[0..end], host);
+    const origin_host = after_scheme[0..end];
+
+    // Same host, different port is expected: DSM serves the UI on :5000 while the
+    // terminal listens on its own port, and cookies are host-scoped (not
+    // port-scoped), so the browser does send the DSM session cookie to us.
+    // Authentication still requires the DSM token, which only a page served by
+    // DSM itself can obtain, so this does not let another local app impersonate
+    // the user.
+    return std.ascii.eqlIgnoreCase(hostWithoutPort(origin_host), hostWithoutPort(host));
 }
 
 fn decodeBase64Url(allocator: std.mem.Allocator, encoded: []const u8) ?[]u8 {
@@ -758,7 +806,12 @@ test "accept key matches the RFC 6455 example" {
 test "origin host comparison" {
     try std.testing.expect(originMatchesHost("https://nas.local:5001", "nas.local:5001"));
     try std.testing.expect(originMatchesHost("http://127.0.0.1:8080", "127.0.0.1:8080"));
+    // DSM page on :5000 → terminal on :7381 of the same host.
+    try std.testing.expect(originMatchesHost("http://nas.local:5000", "nas.local:7381"));
+    try std.testing.expect(originMatchesHost("http://192.168.0.18:5000", "192.168.0.18:7381"));
+    // Different host stays rejected.
     try std.testing.expect(!originMatchesHost("https://evil.example", "nas.local:5001"));
+    try std.testing.expect(!originMatchesHost("http://evil.example:5000", "nas.local:7381"));
     try std.testing.expect(!originMatchesHost("", "nas.local:5001"));
 }
 

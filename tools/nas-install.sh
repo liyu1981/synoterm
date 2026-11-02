@@ -37,6 +37,8 @@ REMOTE_DIR_ARG=""
 COOKIE_ARG=""
 UI_STYLE="url"
 DO_UNINSTALL=0
+VERIFY_ONLY=0
+TRY_CLI=0
 
 usage() {
   sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
@@ -51,6 +53,9 @@ Options:
   --ui-style url|vue  desktop registration flavour (default: url, 7.1-safe)
   --cookie '<header>' use an existing Cookie header instead of logging in
   --remote-dir <path> directory on the NAS for the upload (default: $HOME/.synoterm-test)
+  --try-cli-install   attempt 'synopkg install' anyway (DSM 7 refuses unsigned
+                      packages: error 320, so Package Center is the normal path)
+  --verify-only       verify an existing installation (no build, no upload)
   --uninstall         uninstall instead of installing
   --yes               do not ask for confirmation (still prints everything)
   --dry-run           print the plan, change nothing
@@ -71,6 +76,8 @@ while [ $# -gt 0 ]; do
     --cookie) COOKIE_ARG="${2:?}"; shift 2 ;;
     --remote-dir) REMOTE_DIR_ARG="${2:?}"; shift 2 ;;
     --uninstall) DO_UNINSTALL=1; shift ;;
+    --verify-only) VERIFY_ONLY=1; YES=1; shift ;;
+    --try-cli-install) TRY_CLI=1; shift ;;
     --yes|-y) YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --quiet|-q) VERBOSE=0; shift ;;
@@ -142,43 +149,88 @@ else
 fi
 
 # --------------------------------------------------------------- 4. build --
-step "4/6  build the package"
-why "A static musl binary for ${ARCH} plus the xterm.js bundle, in one .spk."
-nas_build_spk "${UI_STYLE}"
+if [ "${VERIFY_ONLY}" -eq 1 ]; then
+  step "4/6  build — skipped (--verify-only)"
+else
+  step "4/6  build the package"
+  why "A static musl binary for ${ARCH} plus the xterm.js bundle, in one .spk."
+  nas_build_spk "${UI_STYLE}"
+fi
 
 # ------------------------------------------------------------- 5. install --
-step "5/6  install (this changes DSM)"
-why "Uploads the .spk and runs 'synopkg install' as root (sudo password needed)."
-why "DSM unpacks the payload, applies the setuid tool privilege (4750), enables"
-why "the nginx mount /synoterm/ and starts the service."
-if confirm "Install $(basename "${SPK_FILE}") on ${NAS}?"; then
+if [ "${VERIFY_ONLY}" -eq 1 ]; then
+  step "5/6  install — skipped (--verify-only)"
   installed_ok=0
-  if nas_install_spk "${SPK_FILE}"; then
-    step "5b/6  verify the installation"
-    if nas_verify_install yes; then installed_ok=1; fi
-  fi
+  if nas_verify_install yes; then installed_ok=1; fi
   nas_dsm_logout
-  if [ "${installed_ok}" -eq 1 ]; then
-    printf '\n'
-    bold "Open DSM → main menu → Terminal."
-    note "First load may ask nothing at all: the terminal runs as your DSM account."
-    note "Inside the terminal check: id; pwd; stty size"
-  else
-    printf '\n'
-    warn "the package is not installed — the steps above say why"
-    note "you can also install it by hand: DSM → Package Center → Manual Install"
-    note "  ${SPK_FILE}"
-  fi
 else
-  note "skipped. The package was built at:"
-  note "  ${SPK_FILE}"
-  note "Install it later with the same command, or via Package Center → Manual Install."
+  step "5/6  install (this changes DSM)"
+  why "Uploads the .spk next to your home directory on the NAS."
+  why "DSM 7 refuses CLI installs of unsigned packages (error 320, internal"
+  why "worker), so the normal path is Package Center → Manual Install."
+  why "Pass --try-cli-install to attempt 'synopkg install' anyway."
+  installed_ok=0
+  if [ "${TRY_CLI}" -eq 0 ]; then
+    if confirm "Upload $(basename "${SPK_FILE}") to ${NAS} and print the install steps?"; then
+      REMOTE_SPK="${REMOTE_DIR}/$(basename "${SPK_FILE}")"
+      if copy_to_nas "${SPK_FILE}" "${REMOTE_SPK}"; then
+        ok "uploaded to ${REMOTE_SPK}"
+        printf '\n'
+        bold "Now install it from the desktop (one time):"
+        note "  Package Center → Manual Install → $(basename "${SPK_FILE}")"
+        note "  (on this machine it is at ${SPK_FILE})"
+        note "then apply the nginx mount as root:"
+        note "  ssh -t ${SSH_USER}@${NAS} 'sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh'"
+        note "and finally verify:"
+        note "  tools/nas-install.sh ${NAS} --user ${SSH_USER} --verify-only"
+      else
+        warn "upload failed"
+      fi
+      nas_dsm_logout
+    else
+      nas_dsm_logout
+      note "skipped. The package was built at:"
+      note "  ${SPK_FILE}"
+    fi
+  elif confirm "Run 'synopkg install' on ${NAS}?"; then
+    if nas_install_spk "${SPK_FILE}"; then
+      step "5b/6  verify the installation"
+      if nas_verify_install yes; then installed_ok=1; fi
+    fi
+    nas_dsm_logout
+  else
+    nas_dsm_logout
+    note "skipped. The package was built at:"
+    note "  ${SPK_FILE}"
+    note "Install it later with the same command, or via Package Center → Manual Install."
+  fi
+fi
+
+if [ "${installed_ok}" -eq 1 ]; then
+  printf '\n'
+  bold "One more step (root, once) to serve the app from DSM's own web server:"
+  note "  ssh -t ${SSH_USER}@${NAS} 'sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh'"
+  note "It validates with 'nginx -t' and rolls back if DSM would reject it."
+  note "Without it the app still works directly on http://${NAS}:7381/ (allow TCP 7381"
+  note "in Control Panel → Security → Firewall if needed)."
+  printf '\n'
+  bold "Then open DSM → main menu → Terminal."
+  note "Inside the terminal check: id; pwd; stty size"
+elif [ "${VERIFY_ONLY}" -eq 0 ]; then
+  printf '\n'
+  warn "the package is not installed — the steps above say why"
+  if [ -f "${SPK_FILE}" ]; then
+    note "manual install: DSM → Package Center → Manual Install → $(basename "${SPK_FILE}")"
+    note "then:           tools/nas-install.sh ${NAS} --user ${SSH_USER} --verify-only"
+  fi
 fi
 
 # --------------------------------------------------------------- 6. done ---
 step "6/6  summary"
 ok "nas:      ${NAS} (${MODEL:-unknown model}, ${ARCH})"
-ok "package:  $(basename "${SPK_FILE}") (ui ${UI_STYLE}, os_min_ver ${OS_MIN_VER})"
+if [ "${VERIFY_ONLY}" -eq 0 ]; then
+  ok "package:  $(basename "${SPK_FILE}") (ui ${UI_STYLE}, os_min_ver ${OS_MIN_VER})"
+fi
 if read_nas 'test -d /var/packages/synoterm' 2>/dev/null; then
   ok "installed: yes"
   note "logs:     /var/packages/synoterm/var/runtime/synoterm.log"

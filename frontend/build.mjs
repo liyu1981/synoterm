@@ -39,7 +39,7 @@ cpSync(join(here, "src/index.html"), join(outdir, "index.html"));
 // nginx mount path (e.g. "/synoterm/ws"); empty means "derive from the URL".
 writeFileSync(
   join(outdir, "config.js"),
-  'window.SYNOTERM_CONFIG = { ws: "" };\n',
+  'window.SYNOTERM_CONFIG = {};\n',
 );
 cpSync(join(here, "..", "assets", "icon.svg"), join(outdir, "icon.svg"));
 // style.css is bundled into app.js as text and injected at boot, so DSM's

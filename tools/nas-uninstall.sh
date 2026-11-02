@@ -51,11 +51,23 @@ if [ "${YES}" -eq 0 ]; then
 fi
 
 bold "== uninstall"
-if ssh -t "${SSH_OPTS[@]}" "${TARGET}" 'sudo synopkg uninstall synoterm'; then
-  ok "synopkg uninstall returned success"
-else
-  warn "synopkg reported an error (already removed?)"
-fi
+uninstall_out="$(ssh -t "${SSH_OPTS[@]}" "${TARGET}" \
+  'sudo sh -c "export PATH=/usr/syno/bin:/usr/syno/sbin:/usr/sbin:/usr/bin:/sbin:/bin; synopkg uninstall synoterm"' 2>&1)"
+uninstall_status=$?
+printf '%s\n' "${uninstall_out}" | sed 's/^/  /'
+case "${uninstall_out}" in
+  *"internal worker"*|*'"code":320'*)
+    warn "DSM refuses CLI uninstalls of unsigned packages (same worker restriction)"
+    note "remove it from the desktop instead: Package Center → synoterm → Uninstall"
+    ;;
+  *)
+    if [ "${uninstall_status}" -eq 0 ]; then
+      ok "synopkg uninstall succeeded"
+    else
+      warn "synopkg reported an error (already removed?)"
+    fi
+    ;;
+esac
 
 bold "== verification"
 ssh "${SSH_OPTS[@]}" "${TARGET}" '
@@ -82,6 +94,11 @@ ssh "${SSH_OPTS[@]}" "${TARGET}" '
     echo "    nothing on 7381"
   fi
 '
+
+bold "== nginx mount"
+note "If you applied contrib/install-nginx-mount.sh, remove it too:"
+note "  sudo /var/packages/synoterm/target/contrib/uninstall-nginx-mount.sh"
+note "(do this *before* uninstalling the package, or the snippet must go by hand)"
 
 bold "== reminder"
 printf '  Restore Package Center → Settings → General → Trust Level if you changed it\n'
