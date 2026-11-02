@@ -85,6 +85,11 @@ jobs:
         run: ./tools/build-spk.sh ${{ matrix.arch }} 0.1.0-${{ github.run_number }}
       - name: verify package
         run: ./tools/verify-spk.sh build/synoterm-0.1.0-${{ github.run_number }}-${{ matrix.arch }}.spk
+      - name: verify 7.2 (vue) UI variant
+        if: matrix.arch == 'x86_64'
+        run: |
+          SYNOTERM_UI_STYLE=vue ./tools/build-spk.sh x86_64 0.1.0-${{ github.run_number }}-vue
+          ./tools/verify-spk.sh build/synoterm-0.1.0-${{ github.run_number }}-vue-x86_64.spk
       - uses: actions/upload-artifact@v4
         with:
           name: synoterm-${{ matrix.arch }}

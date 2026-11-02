@@ -169,10 +169,12 @@ Details and file contents: [dsm-integration.md](dsm-integration.md).
    with `type: "dsm"`, an nginx snippet `relpath`, a loopback `port`, and an
    `alias` — DSM mounts `location ^~ /<alias>/` and reloads nginx
    (`instuninst_restart_services="nginx.service"`).
-4. **Desktop app.** `ui/config` maps a JS file to a class
-   (`SYNO.SDS.App.Synoterm.Instance`) with `type: "app"`, `appWindow`,
-   `allUsers: false`; the JS defines that class with DSM's Vue globals
-   (`SYNO.namespace`, `Vue.extend`, `<v-app-instance>`, `<v-app-window>`).
+4. **Desktop app.** Two documented registrations exist: `.url` with
+   `type: "url"` + a relative `url` (used by default here, 7.x-safe) and the
+   7.2 Vue form where `ui/config` maps a JS file to a class
+   (`SYNO.SDS.App.Synoterm.Instance`) with `type: "app"`, `appWindow`, and the
+   class is built from `SYNO.namespace` + `Vue.extend` +
+   `<v-app-instance>`/`<v-app-window>`.
 5. **Session identity.** `/usr/syno/synoman/webman/modules/authenticate.cgi`
    prints the authenticated account when invoked with the browser's cookie and
    `HTTP_X_SYNO_TOKEN`; DSM appends `?SynoToken=…` to third-party app script
