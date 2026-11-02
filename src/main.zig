@@ -136,17 +136,25 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var ctx = Ctx{ .allocator = allocator, .cfg = cfg };
 
     const listen_fd = sys.listenIp(cfg.bind_addr, cfg.bind_port, 128) catch |err| {
-        std.debug.print("synoterm: cannot listen on {d}.{d}.{d}.{d}:{d}: {s}\n", .{
+        std.debug.print("synoterm: cannot listen on {d}.{d}.{d}.{d}:{d}: {s} ({s})\n", .{
             cfg.bind_addr[0], cfg.bind_addr[1], cfg.bind_addr[2], cfg.bind_addr[3],
             cfg.bind_port, @errorName(err),
+            if (err == error.AddressInUse) "another process is already listening on that port" else "see the error name",
         });
         return err;
     };
     defer sys.close(listen_fd);
 
-    std.debug.print("synoterm: listening on http://{d}.{d}.{d}.{d}:{d}/ (auth={s}, euid={d})\n", .{
-        cfg.bind_addr[0], cfg.bind_addr[1], cfg.bind_addr[2], cfg.bind_addr[3],
-        cfg.bind_port, @tagName(cfg.auth_mode), sys.geteuid(),
+    std.debug.print("synoterm {s} (api {d}, pid {d}) listening on http://{d}.{d}.{d}.{d}:{d}/ ({s})\n", .{
+        server_version,
+        api_version,
+        sys.currentPid(),
+        cfg.bind_addr[0],
+        cfg.bind_addr[1],
+        cfg.bind_addr[2],
+        cfg.bind_addr[3],
+        cfg.bind_port,
+        @tagName(cfg.auth_mode),
     });
     const loopback_only = cfg.bind_addr[0] == 127 and cfg.bind_addr[1] == 0 and
         cfg.bind_addr[2] == 0 and cfg.bind_addr[3] == 1;

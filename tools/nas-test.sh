@@ -622,10 +622,40 @@ else
       why "script keeps open: DSM kills background jobs when the login session"
       why "ends, which is why a 'nohup … &' server dies instantly."
 
-      # A server left over from an interrupted run would keep the port and keep
-      # serving the *old* binary (the new file is on disk, but the process holds
-      # the old inode) — which looks exactly like "old build" in the UI.
-      on_nas "pkill -f '${REMOTE_DIR}/synoterm' 2>/dev/null; sleep 0.3" >/dev/null 2>&1 || true
+      # A server left over from an interrupted run keeps the port *and* the old
+      # inode, so it keeps serving the old build (no /healthz, old token) while
+      # the freshly copied file sits unused on disk. Kill the exact process that
+      # owns the port (pkill -f would also match our own command line), then
+      # pick a port that is really free.
+      stale_pids="$(on_nas "ss -ltnp 2>/dev/null | sed -n 's/.*:${SMOKE_PORT} .*pid=\\([0-9]*\\).*/\\1/p'" 2>/dev/null | tr -d '\r')"
+      if [ -z "${stale_pids}" ]; then
+        stale_pids="$(on_nas "netstat -ltnp 2>/dev/null | awk '\$4 ~ /:${SMOKE_PORT}\$/ {print \$7}' | cut -d/ -f1" 2>/dev/null | tr -d '\r')"
+      fi
+      if [ -n "${stale_pids}" ]; then
+        warn "port ${SMOKE_PORT} is already in use on the NAS (pids: $(printf '%s' "${stale_pids}" | tr '\n' ' '))"
+        note "that is probably a server from an earlier run still serving the old build"
+        for pid in ${stale_pids}; do
+          on_nas "kill ${pid} 2>/dev/null" || true
+        done
+        sleep 0.5
+      fi
+
+      # Find a port that is actually free; a busy port would leave the old
+      # process answering while our new server fails to bind.
+      base_port="${SMOKE_PORT}"
+      offset=0
+      while [ "${offset}" -lt 20 ]; do
+        candidate=$((base_port + offset))
+        busy="$(on_nas "ss -ltn 2>/dev/null | grep -qw ${candidate} && echo busy" 2>/dev/null | tr -d '\r')"
+        if [ -z "${busy}" ]; then
+          SMOKE_PORT="${candidate}"
+          break
+        fi
+        offset=$((offset + 1))
+      done
+      if [ "${SMOKE_PORT}" != "${base_port}" ]; then
+        warn "port ${base_port} is still busy; using ${SMOKE_PORT} instead"
+      fi
 
       SMOKE_LOG="${ROOT}/build/.smoke-server.log"
       : >"${SMOKE_LOG}"
@@ -650,8 +680,18 @@ else
         sleep 0.25
       done
 
+      launch_log="$(cat "${SMOKE_LOG}" 2>/dev/null || true)"
+      case "${launch_log}" in
+        *"cannot listen"*|*"AddressInUse"*|*"address in use"*)
+          fail "the new server could not bind port ${SMOKE_PORT} (something else is listening)"
+          printf '%s\n' "${launch_log}" | sed 's/^/    /'
+          note "kill the old process on the NAS: ssh ${TARGET} \"pkill -f 'synoterm --listen'\""
+          smoke_ok=0
+          ;;
+      esac
+
       printf '\n'
-      if [ "${listening}" -eq 1 ]; then
+      if [ "${smoke_ok}" -eq 1 ] && [ "${listening}" -eq 1 ]; then
         ok "dev server reachable from this machine on port ${SMOKE_PORT}"
         # Prove the copy that is running is the build we just made (an old
         # binary would have no /healthz and the UI would report a 404).

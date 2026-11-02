@@ -79,7 +79,9 @@ Acceptance: `zig build test` green; e2e asserts terminal echo in Chromium;
 * [ ] Install the x86_64 SPK on Virtual DSM **7.1** (primary target), then 7.2
 * [ ] Verify the `.url` registration: menu icon opens the terminal window
 * [ ] Verify `ui/web/config.js` is honoured (WS goes to `/synoterm/ws`)
-* [ ] Verify `--auth dsm` with **cookie only** (no `SynoToken` under `.url`)
+* [x] `--auth dsm` cookie-only probe on DSM 7.1.1-42962: **rejected** — a token
+      is required (`cookie + token` works), so the `.url` build discovers the
+      token from the same-origin DSM desktop (see dsm-integration.md §5.3)
 * [ ] If cookie-only fails: build with `SYNOTERM_UI_STYLE=vue` and re-test
 * [ ] Verify group gating with a non-admin DSM account (403 / hidden icon)
 * [ ] Verify the nginx mount: `/synoterm/ws` upgrades over HTTPS

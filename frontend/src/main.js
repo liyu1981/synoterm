@@ -86,38 +86,86 @@ function apiPath(name) {
 /**
  * DSM's CSRF token, if we can find it.
  *
- *  - DSM 7.2 app scripts get `?SynoToken=…` appended to their src; the wrapper
- *    forwards it into this page's URL.
- *  - With the DSM 7.0/7.1 `.url` registration nothing is injected, so we try
- *    the same-origin DSM desktop frame and the token cookie.
+ * Sources, in order of trustworthiness:
+ *   1. `?SynoToken=` on this page (the DSM 7.2 wrapper forwards it)
+ *   2. the same-origin DSM desktop window (frame or popup): globals, the DOM
+ *      bootstrap, or its cookies
+ *   3. a same-origin fetch of /webman/index.cgi (the desktop HTML contains it)
+ *   4. a `SynoToken` cookie, if this DSM build sets one
  *
- * An empty value is fine: the backend falls back to cookie-only
- * authentication, and rejects the session if DSM disagrees.
+ * The `.url` registration gives us no injected token, but the terminal page is
+ * same-origin with the DSM desktop, so on DSM 7.1 the token is usually reachable
+ * through 2 or 3.
  */
-function synoToken() {
+let tokenCache = { value: "", source: "none" };
+
+function rememberToken(value, source) {
+  if (value && !tokenCache.value) {
+    tokenCache = { value, source };
+    console.info(`synoterm: DSM token from ${source} (${value.length} chars)`);
+  }
+  return tokenCache.value;
+}
+
+function tokenFromText(text) {
+  const match = text.match(/SynoToken["']?\s*[:=]\s*["']([^"'&<>]+)["']/);
+  return match ? match[1] : "";
+}
+
+function tokenFromWindow(win) {
+  if (!win || win === window) return "";
+  try {
+    const candidates = [win.SynoToken, win._SynoToken];
+    if (win.SYNO && win.SYNO.SDS && win.SYNO.SDS.Session) {
+      const session = win.SYNO.SDS.Session;
+      candidates.push(typeof session.getSynoToken === "function" ? session.getSynoToken() : undefined);
+    }
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.length > 0) return candidate;
+    }
+    const cookie = win.document.cookie || "";
+    const match = cookie.match(/(?:^|;\s*)(?:SynoToken|_SynoToken)=([^;]+)/);
+    if (match) return decodeURIComponent(match[1]);
+    const html = win.document.documentElement ? win.document.documentElement.outerHTML : "";
+    return tokenFromText(html.slice(0, 4 * 1024 * 1024));
+  } catch {
+    return "";
+  }
+}
+
+async function discoverSynoToken() {
+  if (tokenCache.value) return tokenCache.value;
+
   const fromUrl = new URLSearchParams(window.location.search).get("SynoToken");
-  if (fromUrl) return fromUrl;
+  if (fromUrl) return rememberToken(fromUrl, "page URL");
+
+  for (const [name, win] of [
+    ["parent frame", window.parent],
+    ["opener window", window.opener],
+    ["top window", window.top],
+  ]) {
+    const value = tokenFromWindow(win);
+    if (value) return rememberToken(value, name);
+  }
 
   try {
-    const parentWindow = window.parent;
-    if (parentWindow && parentWindow !== window) {
-      const candidates = [
-        parentWindow.SynoToken,
-        parentWindow._SynoToken,
-        parentWindow.SYNO && parentWindow.SYNO.SDS && parentWindow.SYNO.SDS.Session
-          ? parentWindow.SYNO.SDS.Session.getSynoToken?.()
-          : undefined,
-      ];
-      for (const candidate of candidates) {
-        if (typeof candidate === "string" && candidate.length > 0) return candidate;
-      }
+    const response = await fetch("/webman/index.cgi", { credentials: "same-origin" });
+    if (response.ok) {
+      const value = tokenFromText(await response.text());
+      if (value) return rememberToken(value, "/webman/index.cgi");
     }
   } catch {
-    /* cross-origin parent (dev server) — expected */
+    /* not served from the DSM origin (dev server) */
   }
 
   const match = document.cookie.match(/(?:^|;\s*)(?:SynoToken|_SynoToken)=([^;]+)/);
-  return match ? decodeURIComponent(match[1]) : "";
+  if (match) return rememberToken(decodeURIComponent(match[1]), "cookie");
+
+  return "";
+}
+
+function synoToken() {
+  return tokenCache.value;
 }
 
 function base64url(token) {
@@ -166,13 +214,23 @@ class Session {
     return this.pane;
   }
 
-  connect() {
+  async connect() {
+    if (this.connecting) return;
+    this.connecting = true;
+    try {
+      await this.openSocket();
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  async openSocket() {
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${scheme}//${window.location.host}${wsPath()}`;
     const protocols = [];
     const dev = devToken();
     if (dev) protocols.push(`synoterm.dev-token.${base64url(dev)}`);
-    const token = synoToken();
+    const token = await discoverSynoToken();
     if (token) protocols.push(synoTokenSubprotocol(token));
 
     this.setState("connecting");
@@ -271,8 +329,11 @@ class Session {
       }
       if (!response.ok) {
         const reason = info?.reason || `HTTP ${response.status}`;
-        this.manager.setNotice(reason, true);
-        this.term.write(`\r\n\x1b[31m${reason}\x1b[0m\r\n`);
+        const tokenNote = tokenCache.value
+          ? ` (DSM token from ${tokenCache.source})`
+          : " (no DSM token found — open the terminal from the DSM desktop)";
+        this.manager.setNotice(`${reason}${tokenNote}`, true);
+        this.term.write(`\r\n\x1b[31m${reason}\x1b[0m\r\n\x1b[2m${tokenNote.trim()}\x1b[0m\r\n`);
         return;
       }
       const user = info?.user ? ` as ${info.user}` : "";

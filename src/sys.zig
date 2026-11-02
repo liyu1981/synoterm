@@ -257,8 +257,15 @@ pub fn listenLoopback(port: u16, backlog: u32) Error!fd_t {
     return listenIp(.{ 127, 0, 0, 1 }, port, backlog);
 }
 
+pub const ListenError = error{
+    AddressInUse,
+    PermissionDenied,
+    InvalidAddress,
+    SyscallFailed,
+};
+
 /// Listens on an arbitrary IPv4 address (0.0.0.0 = all interfaces).
-pub fn listenIp(octets: [4]u8, port: u16, backlog: u32) Error!fd_t {
+pub fn listenIp(octets: [4]u8, port: u16, backlog: u32) ListenError!fd_t {
     const sfd_rc = linux.socket(AF_INET, SOCK.STREAM | SOCK.CLOEXEC, 0);
     if (linux.errno(sfd_rc) != .SUCCESS) return error.SyscallFailed;
     const sfd: fd_t = @intCast(sfd_rc);
@@ -268,8 +275,17 @@ pub fn listenIp(octets: [4]u8, port: u16, backlog: u32) Error!fd_t {
     _ = linux.setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, @ptrCast(&one), @sizeOf(u32));
 
     var addr = sockaddr(octets, port);
-    _ = try okOrErr(linux.bind(sfd, @ptrCast(&addr), @sizeOf(SockaddrIn)));
-    _ = try okOrErr(linux.listen(sfd, backlog));
+    _ = switch (linux.errno(linux.bind(sfd, @ptrCast(&addr), @sizeOf(SockaddrIn)))) {
+        .SUCCESS => {},
+        .ADDRINUSE => return error.AddressInUse,
+        .ACCES, .PERM => return error.PermissionDenied,
+        .ADDRNOTAVAIL => return error.InvalidAddress,
+        else => return error.SyscallFailed,
+    };
+    _ = switch (linux.errno(linux.listen(sfd, backlog))) {
+        .SUCCESS => {},
+        else => return error.SyscallFailed,
+    };
     return sfd;
 }
 

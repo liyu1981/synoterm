@@ -228,7 +228,24 @@ SYNO.SDS.App.Synoterm.Instance = Vue.extend({
 The iframe URL carries `ws=/synoterm/ws` and `SynoToken=…` (read from the
 wrapper script's own `src`, where DSM appends it).
 
-### 5.3 Fallback if 7.1 needs a token: ExtJS wrapper
+### 5.3 Token discovery in the `.url` build (implemented)
+
+On DSM 7.1 `authenticate.cgi` rejects a cookie-only request (verified on
+7.1.1-42962: `cookie only -> <empty> (exit 7)`, `cookie + token -> user`), while
+the `.url` registration injects no token. The page is same-origin with the DSM
+desktop, so the bundle now discovers the token itself, in order:
+
+1. `?SynoToken=` on the page URL (the 7.2 wrapper forwards it),
+2. the DSM desktop window (`parent`/`opener`/`top`): `SynoToken`/`_SynoToken`
+   globals, `SYNO.SDS.Session.getSynoToken()`, its cookies, and a scan of its
+   DOM for `SynoToken: "…"`,
+3. `fetch('/webman/index.cgi')` and the same regex over the desktop HTML,
+4. a `SynoToken` cookie.
+
+The source is logged to the console (`synoterm: DSM token from …`) and shown in
+the status bar when a connection is refused, so a failure is diagnosable.
+
+### 5.4 Fallback if 7.1 needs a token and discovery fails: ExtJS wrapper
 
 If M1 shows that cookie-only auth is rejected on 7.1 *and* the `.url` style is
 preferred over the 7.2 Vue framework, the third option is the classic ExtJS
@@ -531,6 +548,12 @@ the exact response body of a rejected upgrade.
 
   If you need it detached, use DSM's Task Scheduler ("Run command" as your
   user) rather than `nohup` over ssh.
+* The UI says "server has no /status (old build…)" or the smoke probe returns
+  `403 dev token missing` while the freshly copied file is on the NAS: an old
+  synoterm process still owns the port (the new file is on disk, the old process
+  keeps the old inode). `nas-test.sh` now kills the exact PID that owns the port
+  and then picks a port that is really free; manually:
+  `ssh <user>@<nas> "pkill -f 'synoterm --listen'"`
 * Stray rows of repeated characters in the terminal (e.g. `$$$$$$$` or `----4444`)
   mean xterm.js's stylesheet is missing from the bundle — it hides the font
   width-measurement container. `tools/e2e.mjs` asserts this now.
