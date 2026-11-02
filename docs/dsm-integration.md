@@ -411,6 +411,25 @@ Outcome decides the UI style:
 | only `cookie + token` prints it | build `SYNOTERM_UI_STYLE=vue` (7.2) or add the ExtJS wrapper (§5.3) |
 | both empty | re-copy the cookie with the desktop tab open; the session may have expired |
 
+### Troubleshooting the test run
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `scp: dest open "…/tmp/synoterm-test/…": No such file or directory` right after a successful `mkdir` | DSM's sshd uses **PrivateTmp**: every `ssh`/`scp` sees a different `/tmp` | use the home directory — `nas-test.sh` does this automatically (`$HOME/.synoterm-test`) |
+| password asked on every command | no SSH connection reuse | `nas-test.sh` sets `ControlMaster`/`ControlPersist`; one prompt per run |
+| `cannot create … on the NAS` | `$HOME` is `/` or not writable (user home service disabled) | Control Panel → User & Group → Advanced → enable User Home, or `--user root` |
+| probe says `cookie only -> <empty>` | DSM needs the `SynoToken` for this build | `--ui-style vue` (7.2) or the ExtJS wrapper (§5.3) |
+| terminal answers **403** | account not in `administrators` | add the account to that group, or set `REQUIRE_GROUP=""` in `$SYNOPKG_PKGVAR/etc/synoterm.conf` and restart the package |
+
+The service config lives in `$SYNOPKG_PKGVAR/etc/synoterm.conf` (created by
+`postinst`, never overwritten on upgrade):
+
+```sh
+REQUIRE_GROUP="administrators"   # empty = any authenticated local account
+MAX_SESSIONS="8"
+EXTRA_ARGS=""                    # e.g. --idle-timeout 3600
+```
+
 ### Stage 2 — binary, PTY and browser, no package (reversible)
 
 This validates the static musl binary, PTY spawning, `setuid`-based user

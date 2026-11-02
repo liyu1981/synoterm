@@ -48,6 +48,7 @@ plugs into DSM 7.1+ without opening a single extra firewall port.
 | DSM session auth (`authenticate.cgi` + group check) | implemented, needs on-device verification |
 | Multi-arch SPK build (`tools/build-spk.sh`) | working (x86_64 verified, armv8/armv7 cross-compiled) |
 | v1 policy: DSM 7.1 floor, admins only, local accounts only, kill on disconnect | implemented |
+| Service config (`$SYNOPKG_PKGVAR/etc/synoterm.conf`: require-group, max sessions) | implemented |
 | Persistent sessions / reattach (`libghostty-vt`) | deferred (v1 kills sessions on disconnect); design kept in docs |
 
 The full roadmap, decisions, risks and open questions are in

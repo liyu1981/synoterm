@@ -44,6 +44,21 @@ if [ -r /etc/VERSION ]; then
   fi
 fi
 
+say "== account"
+say "  user:   $(id -un)"
+say "  uid:    $(id -u)"
+groups_list="$(id -Gn 2>/dev/null || true)"
+say "  groups: ${groups_list}"
+case " ${groups_list} " in
+  *" administrators "*) ok "member of administrators (required by default)" ;;
+  *) warn "not in administrators — the terminal will be refused (403) unless --require-group is changed" ;;
+esac
+if command -v sudo >/dev/null 2>&1; then
+  ok "sudo available: $(command -v sudo)"
+else
+  warn "sudo not found — package install/uninstall cannot run unattended"
+fi
+
 say "== required binaries"
 for path in /usr/syno/synoman/webman/modules/authenticate.cgi \
             /usr/bin/id /bin/sh /bin/bash /usr/bin/nohup /usr/bin/tar; do
@@ -71,6 +86,16 @@ if [ -x "${cgi}" ]; then
   fi
 else
   bad "authenticate.cgi not executable; DSM auth will not work"
+fi
+
+say "== /tmp visibility"
+probe="/tmp/.synoterm-preflight-$$"
+if touch "${probe}" 2>/dev/null; then
+  say "  /tmp writable in this session"
+  rm -f "${probe}" 2>/dev/null || true
+  warn "if files created here are invisible to the next ssh/scp, the NAS uses PrivateTmp"
+else
+  warn "/tmp is not writable by $(id -un)"
 fi
 
 say "== loopback port ${PORT}"

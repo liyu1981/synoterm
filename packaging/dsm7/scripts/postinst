@@ -4,6 +4,25 @@
 set -eu
 
 VAR="${SYNOPKG_PKGVAR}"
-mkdir -p "${VAR}/home" "${VAR}/runtime"
+mkdir -p "${VAR}/home" "${VAR}/runtime" "${VAR}/etc"
 chmod 700 "${VAR}/home" "${VAR}/runtime"
+
+# Never overwrite an existing config on upgrade.
+if [ ! -f "${VAR}/etc/synoterm.conf" ]; then
+  cat >"${VAR}/etc/synoterm.conf" <<'CONF'
+# synoterm service settings (read by start-stop-status).
+#
+# Group a DSM account must belong to in order to open a terminal.
+# Set to an empty string to allow every authenticated local DSM account.
+REQUIRE_GROUP="administrators"
+#
+# Concurrent terminal limit across all users.
+MAX_SESSIONS="8"
+#
+# Extra flags appended to the command line, e.g.:
+# EXTRA_ARGS="--idle-timeout 3600"
+EXTRA_ARGS=""
+CONF
+  chmod 600 "${VAR}/etc/synoterm.conf"
+fi
 exit 0

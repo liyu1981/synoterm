@@ -39,6 +39,7 @@ COOKIE_ARG=""
 FORCE_UI_STYLE=""
 COOKIE_ONLY_OK="unknown"
 PROBED=0
+DSM_LOGGED_OUT=0
 INSTALLED="no"
 VERBOSE=1
 TRACE=0
@@ -95,8 +96,17 @@ done
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${SSH_USER}@${NAS}"
-SSH_OPTS=(-p "${SSH_PORT}" -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
-REMOTE_DIR="/tmp/synoterm-test"
+# Reuse one SSH connection for the whole run: DSM asks for the password once
+# instead of on every ssh/scp call.
+CONTROL_PATH="${TMPDIR:-/tmp}/synoterm-ssh-%r@%h-%p"
+SSH_OPTS=(-p "${SSH_PORT}" -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new
+          -o ControlMaster=auto -o ControlPath="${CONTROL_PATH}" -o ControlPersist=600)
+SCP_OPTS=(-P "${SSH_PORT}" -o ControlMaster=auto -o ControlPath="${CONTROL_PATH}" -o ControlPersist=600)
+
+# NEVER use /tmp for the payload: DSM's sshd runs with PrivateTmp, so every
+# ssh/scp call sees a different /tmp. The work dir goes in the login user's
+# home directory instead (resolved in step 2).
+REMOTE_DIR=""
 
 # ------------------------------------------------------------------ helpers --
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -183,21 +193,30 @@ copy_to_nas() {
     printf '  \033[2m[dry-run] scp %s -> %s:%s\033[0m\n' "$1" "${NAS}" "$2"
     return 0
   fi
-  trace "scp -P ${SSH_PORT} ${1} ${TARGET}:${2}"
-  scp -P "${SSH_PORT}" -q "$1" "${TARGET}:$2"
+  trace "scp ${1} ${TARGET}:${2}"
+  scp "${SCP_OPTS[@]}" -q "$1" "${TARGET}:$2"
   status=$?
   [ "${status}" -eq 0 ] || printf '  \033[2m<- exit %s\033[0m\n' "${status}" >&2
   return "${status}"
 }
 
 cleanup() {
+  if [ "${LOGGED_IN:-0}" -eq 1 ] && [ "${DSM_LOGGED_OUT:-0}" -eq 0 ] && [ "${DRY_RUN}" -eq 0 ] && [ -n "${DSM_SID:-}" ]; then
+    printf '%s\n' "url = \"https://${NAS}:${DSM_PORT}/webapi/auth.cgi\"
+data-urlencode = \"api=SYNO.API.Auth\"
+data-urlencode = \"version=6\"
+data-urlencode = \"method=logout\"
+data-urlencode = \"session=Synoterm\"
+data-urlencode = \"_sid=${DSM_SID}\"" | curl -sS -k --max-time 8 --config - >/dev/null 2>&1 || true
+  fi
   if [ -n "${LOG_FILE}" ] && [ -f "${LOG_FILE}" ]; then
     esc=$(printf '\033')
     sed "s/${esc}\[[0-9;]*m//g" "${LOG_FILE}" > "${LOG_FILE}.tmp" 2>/dev/null \
       && mv "${LOG_FILE}.tmp" "${LOG_FILE}" || rm -f "${LOG_FILE}.tmp"
   fi
   [ "${DRY_RUN}" -eq 1 ] && return 0
-  on_nas "rm -rf '${REMOTE_DIR}'" >/dev/null 2>&1 || true
+  [ -n "${REMOTE_DIR}" ] && on_nas "rm -rf '${REMOTE_DIR}'" >/dev/null 2>&1 || true
+  ssh "${SSH_OPTS[@]}" -O exit "${TARGET}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -257,12 +276,35 @@ esac
 
 # ------------------------------------------------------------ 2. preflight --
 step "2/6  preflight (read-only)"
-why "Copies two small scripts to ${REMOTE_DIR} and runs the preflight."
+REMOTE_HOME="$(read_nas 'printf %s "$HOME"')"
+if [ -z "${REMOTE_HOME}" ]; then
+  die "could not read \$HOME on the NAS"
+fi
+REMOTE_DIR="${REMOTE_HOME}/.synoterm-test"
+why "Work dir: ${REMOTE_DIR} (not /tmp: DSM's sshd uses PrivateTmp, so /tmp is"
+why "per-connection and scp would not see files created by a previous ssh)."
 why "It only reads: /etc/VERSION, binaries, /etc/nginx, netstat, /var/packages."
-on_nas "mkdir -p '${REMOTE_DIR}'" >/dev/null || die "cannot create ${REMOTE_DIR} on the NAS"
-copy_to_nas "${ROOT}/tools/nas-preflight.sh" "${REMOTE_DIR}/nas-preflight.sh"
-copy_to_nas "${ROOT}/tools/nas-auth-test.sh" "${REMOTE_DIR}/nas-auth-test.sh"
+
+on_nas "mkdir -p '${REMOTE_DIR}' && chmod 700 '${REMOTE_DIR}'" || die "cannot create ${REMOTE_DIR} on the NAS
+  hint: if \$HOME is '/' or not writable, enable DSM's user home service
+        (Control Panel → User & Group → Advanced → User Home) or run over
+        'ssh root@nas' instead."
+copy_to_nas "${ROOT}/tools/nas-preflight.sh" "${REMOTE_DIR}/nas-preflight.sh" \
+  || die "scp to ${REMOTE_DIR} failed — check that ${REMOTE_HOME} is writable by ${SSH_USER}"
+copy_to_nas "${ROOT}/tools/nas-auth-test.sh" "${REMOTE_DIR}/nas-auth-test.sh" \
+  || die "scp to ${REMOTE_DIR} failed"
 on_nas "chmod 700 '${REMOTE_DIR}/nas-preflight.sh' '${REMOTE_DIR}/nas-auth-test.sh'"
+
+# Diagnostic for the /tmp surprise: DSM sshd commonly runs with PrivateTmp.
+if [ "${DRY_RUN}" -eq 0 ]; then
+  if read_nas 'touch /tmp/.synoterm-probe 2>/dev/null' 2>/dev/null \
+     && read_nas 'test -f /tmp/.synoterm-probe' 2>/dev/null; then
+    ok "/tmp is shared between ssh sessions"
+    read_nas 'rm -f /tmp/.synoterm-probe' >/dev/null 2>&1 || true
+  else
+    warn "/tmp is private per ssh session (DSM PrivateTmp) — using ${REMOTE_DIR} instead"
+  fi
+fi
 if [ "${DRY_RUN}" -eq 1 ]; then
   note "[dry-run] would run ${REMOTE_DIR}/nas-preflight.sh on the NAS"
 else
@@ -357,7 +399,8 @@ ${DSM_OTP:+data-urlencode = \"otp_code=${DSM_OTP}\"}"
   # Secrets travel over the SSH channel only: a 0600 file, then removed.
   printf '%s\n%s\n' "${COOKIE_HEADER}" "${DSM_TOKEN}" > "${ROOT}/build/.cookie.$$"
   chmod 600 "${ROOT}/build/.cookie.$$"
-  copy_to_nas "${ROOT}/build/.cookie.$$" "${REMOTE_DIR}/cookie"
+  copy_to_nas "${ROOT}/build/.cookie.$$" "${REMOTE_DIR}/cookie" \
+    || { rm -f "${ROOT}/build/.cookie.$$"; die "cannot copy the session cookie to ${REMOTE_DIR}"; }
   rm -f "${ROOT}/build/.cookie.$$"
   on_nas "chmod 600 '${REMOTE_DIR}/cookie'"
 
@@ -378,8 +421,19 @@ ${DSM_OTP:+data-urlencode = \"otp_code=${DSM_OTP}\"}"
   else
     COOKIE_ONLY_OK="unknown"
 PROBED=0
+DSM_LOGGED_OUT=0
   fi
   PROBED=1
+  dsm_groups="$(read_nas "id -Gn '${DSM_USER}' 2>/dev/null" || true)"
+  if [ -n "${dsm_groups}" ]; then
+    why "DSM groups for ${DSM_USER}: ${dsm_groups}"
+    case " ${dsm_groups} " in
+      *" administrators "*) ok "${DSM_USER} is in administrators (required by the package)" ;;
+      *) warn "${DSM_USER} is NOT in administrators — the terminal would answer 403"
+         note "test anyway, or set REQUIRE_GROUP in \$SYNOPKG_PKGVAR/etc/synoterm.conf" ;;
+    esac
+  fi
+
   case "${COOKIE_ONLY_OK}" in
     yes) ok "cookie-only authentication works on this DSM" ;;
     no)  warn "cookie-only authentication did NOT return an account" ;;
@@ -548,6 +602,7 @@ data-urlencode = \"version=6\"
 data-urlencode = \"method=logout\"
 data-urlencode = \"session=Synoterm\"
 data-urlencode = \"_sid=${DSM_SID}\"" | curl -sS -k --max-time 10 --config - >/dev/null 2>&1
+      DSM_LOGGED_OUT=1
       ok "logged the test session out"
     fi
 

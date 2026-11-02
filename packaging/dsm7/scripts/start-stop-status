@@ -11,6 +11,19 @@ PORT="7381"
 
 DEST="${SYNOPKG_PKGDEST:-/var/packages/${PKG_NAME}/target}"
 VAR="${SYNOPKG_PKGVAR:-/var/packages/${PKG_NAME}/var}"
+CONF="${VAR}/etc/synoterm.conf"
+
+# Optional overrides (postinst writes a commented template):
+#   REQUIRE_GROUP=administrators   group a DSM account must belong to
+#   MAX_SESSIONS=8                 concurrent terminal limit
+#   EXTRA_ARGS=                    any other synoterm flag
+REQUIRE_GROUP="administrators"
+MAX_SESSIONS="8"
+EXTRA_ARGS=""
+if [ -r "${CONF}" ]; then
+  # shellcheck disable=SC1090
+  . "${CONF}"
+fi
 BIN="${DEST}/bin/synoterm"
 RUNTIME="${VAR}/runtime"
 PID_FILE="${RUNTIME}/synoterm.pid"
@@ -38,6 +51,9 @@ case "${1:-}" in
       --auth dsm \
       --base-path /synoterm \
       --web-root "${DEST}/ui/web" \
+      --require-group "${REQUIRE_GROUP}" \
+      --max-sessions "${MAX_SESSIONS}" \
+      ${EXTRA_ARGS} \
       >>"${LOG_FILE}" 2>&1 &
     pid=$!
     echo "${pid}" >"${PID_FILE}"
