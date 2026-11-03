@@ -17,12 +17,49 @@ ships as a native `.spk` with no runtime dependencies on the NAS.
 - Static musl binary: x86_64, aarch64, armv7
 - No runtime dependencies on the NAS
 
-## Install
+## Install on DSM 7.1
 
-1. Download the `.spk` for your architecture from the
-   [releases page](https://github.com/liyu1981/synoterm/releases).
-2. In DSM: **Package Center → Manual Install**, select the `.spk`.
-3. Open **SynoTerm** from the DSM desktop.
+1. **Package Center → Manual Install** → `synoterm-<version>-<arch>.spk`
+   (architecture per `uname -m`: `x86_64`, `aarch64` → armv8, `armv7`).
+   DSM 7 refuses CLI installs of unsigned packages
+   (`error 320, non-synology-signed package should not use internal worker`), so
+   the install must go through Package Center's UI.
+
+2. **One-time, as root — mount the terminal on DSM's web server:**
+
+   ```sh
+   sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh
+   ```
+
+   **Why this step exists:** the clean way to reach a WebSocket is DSM's own nginx
+   (`https://nas:5001/synoterm/…`), and DSM exposes that as a *package resource*
+   handled by one of its **internal workers**. DSM 7 only lets
+   Synology-signed packages use internal workers — a self-built package is
+   rejected before it is installed. So the package ships the same nginx snippet
+   as a file and this helper applies it from your root shell instead: it finds a
+   directory nginx already includes inside a `server {}` block, runs `nginx -t`,
+   **removes the file again if nginx would reject it**, then restarts nginx.
+
+   *Optional.* Skip it and the app still works: DSM serves the UI from
+   `ui/web`, and the terminal listens on port 7381 of the NAS (allow TCP 7381 in
+   *Control Panel → Security → Firewall*). The UI detects which mode is available
+   (`window.synotermBackend` in the console shows `proxy` or `direct`).
+
+3. **DSM → main menu → Terminal.** The shell runs as your DSM account; check with
+   `id`, `pwd`, `stty size`.
+
+Upgrading is step 1 again (install over the old version); `contrib/` changes too,
+so re-run step 2 only if the helper's output asks you to. Removing:
+
+```sh
+sudo /var/packages/synoterm/target/contrib/uninstall-nginx-mount.sh   # before uninstalling
+```
+
+Troubleshooting in one command:
+
+```sh
+sudo /var/packages/synoterm/target/contrib/diagnose.sh
+```
 
 ## High-level overview
 
@@ -37,6 +74,9 @@ DSM desktop (http://nas:5000)
                               ▼
   /dev/ptmx ── fork ── setuid(user) ── exec shell
 ```
+
+Target: DSM 7.0/7.1 (verified on DSM 7.1.1-42962 / DS218+). DSM 7.2 Vue window
+is a build flag (`SYNOTERM_UI_STYLE=vue`), not the target.
 
 ## Develop
 
@@ -62,6 +102,4 @@ Package a `.spk`:
 ./tools/verify-spk.sh build/<file>.spk
 ```
 
-## License
-
-See [LICENSE](LICENSE).
+More background and design decisions: [docs/history.md](docs/history.md).
