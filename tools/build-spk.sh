@@ -4,7 +4,7 @@
 #   tools/build-spk.sh [arch] [version]
 #
 # arch:    x86_64 | armv8 | armv7   (default: x86_64)
-# version: SPK version, "x.y.z-rev" (default: 0.1.1-0001)
+# version: SPK version, "x.y.z-rev" (default: 0.1.2-0001)
 #
 # Env:
 #   SYNOTERM_OS_MIN_VER  override os_min_ver (default: 7.1-42661)
@@ -32,7 +32,7 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
 ARCH="${1:-x86_64}"
-SPK_VERSION="${2:-0.1.1-0001}"
+SPK_VERSION="${2:-0.1.2-0001}"
 
 case "${ARCH}" in
   x86_64) ZIG_TARGET="x86_64-linux-musl" ;;

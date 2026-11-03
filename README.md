@@ -170,25 +170,25 @@ Pushing a version tag builds every architecture and publishes a GitHub Release
 with the `.spk` files, a `SHA256SUMS`, and the install/upgrade/rollback steps:
 
 ```sh
-git tag -a v0.1.1 -m "synoterm 0.1.1"
-git push origin v0.1.1
+git tag -a v0.1.2 -m "synoterm 0.1.2"
+git push origin v0.1.2
 ```
 
-The tag becomes the DSM package version: `v0.1.1` → `0.1.1-<CI run number>`,
-`v0.1.1-42` → `0.1.1-42` (explicit build number, for a re-release), and
-`v0.1.1-rc1` marks the release as a prerelease. The workflow
+The tag becomes the DSM package version: `v0.1.2` → `0.1.2-<CI run number>`,
+`v0.1.2-42` → `0.1.2-42` (explicit build number, for a re-release), and
+`v0.1.2-rc1` marks the release as a prerelease. The workflow
 (`.github/workflows/release.yml`) runs the unit tests and the static/glibc check
 before packaging, then verifies each `.spk` with `tools/verify-spk.sh`.
 
 ## Build a DSM package
 
 ```sh
-./tools/build-spk.sh x86_64 0.1.1-0001     # → build/synoterm-0.1.1-0001-x86_64.spk
-./tools/build-spk.sh armv8  0.1.1-0001
-./tools/build-spk.sh armv7  0.1.1-0001
+./tools/build-spk.sh x86_64 0.1.2-0001     # → build/synoterm-0.1.2-0001-x86_64.spk
+./tools/build-spk.sh armv8  0.1.2-0001
+./tools/build-spk.sh armv7  0.1.2-0001
 
 # DSM 7.2 desktop framework (v-app-window) instead of the 7.1-safe .url style:
-SYNOTERM_UI_STYLE=vue ./tools/build-spk.sh x86_64 0.1.1-0001
+SYNOTERM_UI_STYLE=vue ./tools/build-spk.sh x86_64 0.1.2-0001
 ```
 
 Default UI style is `url` (documented for 7.x, works on the 7.1 floor). Under
