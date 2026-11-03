@@ -17,6 +17,20 @@ ships as a native `.spk` with no runtime dependencies on the NAS.
 - Static musl binary: x86_64, aarch64, armv7
 - No runtime dependencies on the NAS
 
+## Scope
+
+**Target: DSM 7.0/7.1** (verified on DSM 7.1.1-42962 / DS218+). The desktop
+window is registered as an ExtJS app. DSM 7.2's Vue window is a build flag
+(`SYNOTERM_UI_STYLE=vue`), not the target.
+
+In scope: terminal (real PTY, resize, multiple windows, scrollback, font settings);
+x86_64/aarch64/armv7 static musl binaries; DSM account integration (shell runs as
+the logged-in DSM user, admins only, local accounts only); no SSH/Python/Node on
+the NAS; unsigned packages (two-step install).
+
+Out of scope for 1.x: sessions surviving window close; file manager/SFTP; DSM 6.x
+and 7.2+ as primary target; signed packages.
+
 ## Install on DSM 7.1
 
 1. **Package Center → Manual Install** → `synoterm-<version>-<arch>.spk`
