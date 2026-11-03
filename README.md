@@ -2,6 +2,8 @@
 
 # synoterm
 
+![synoterm demo](https://raw.githubusercontent.com/liyu1981/synoterm/master/assets/synoterm-demo.png)
+
 A terminal that opens **inside the Synology DSM desktop** as a real desktop
 window: **xterm.js** renders it, a small **Zig** binary owns the PTY, and it
 ships as a native `.spk` with no runtime dependencies on the NAS.
