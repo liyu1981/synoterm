@@ -212,12 +212,17 @@ function apiPath(name) {
  */
 let tokenCache = { value: "", source: "none" };
 
-function rememberToken(value, source) {
-  if (value && !tokenCache.value) {
+function rememberToken(value, source, force = false) {
+  if (value && (force || !tokenCache.value)) {
     tokenCache = { value, source };
     console.info(`synoterm: DSM token from ${source} (${value.length} chars)`);
   }
   return tokenCache.value;
+}
+
+function clearTokenCache() {
+  tokenCache = { value: "", source: "none" };
+  console.info("synoterm: cleared cached DSM token");
 }
 
 /** Where we looked, so a support report can explain a failure. */
@@ -294,7 +299,8 @@ function tokenFromWindow(win) {
   }
 }
 
-async function discoverSynoToken() {
+async function discoverSynoToken(force = false) {
+  if (force) clearTokenCache();
   if (tokenCache.value) return tokenCache.value;
   tokenSources = [];
   window.synotermTokenSources = tokenSources;
@@ -585,6 +591,12 @@ class Session {
       }
       if (!response.ok) {
         const reason = info?.reason || `HTTP ${response.status}`;
+        // A stale/missing CSRF token is the common cause of a 401 here; drop
+        // the cached token so the next reconnect re-discovers it instead of
+        // retrying with the same dead value.
+        if (response.status === 401 || /synotoken|token/i.test(reason)) {
+          clearTokenCache();
+        }
         const tokenNote = tokenCache.value
           ? ` (DSM token from ${tokenCache.source})`
           : " (no DSM token found — open the terminal from the DSM desktop)";
