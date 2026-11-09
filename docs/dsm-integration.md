@@ -112,13 +112,16 @@ sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh
 
 What that script does (`contrib/install-nginx-mount.sh`):
 
-1. finds **every** directory nginx already includes *inside a `server { }`
-   block* (`include …/www.*.conf;` → it writes `www.synoterm.conf` so the
-   pattern matches) and installs the snippet in all of them — DSM's `:5000`
-   HTTP and `:5001` HTTPS vhosts are separate blocks, and a `location` included
-   by only one of them 404s on the other. If there is no such directory it
-   writes `/usr/local/etc/nginx/conf.d/synoterm.conf` and prints the include
-   line to add by hand, naming the vhosts;
+1. writes the snippet to `/etc/nginx/conf.d/dsm.synoterm.conf` — DSM keeps the
+   per-vhost `location` conf of its own apps there and every desktop
+   `server { }` block loads `include conf.d/dsm.*.conf;`, so the `dsm.*.conf`
+   pattern picks the file up in *both* the `:5000` HTTP and the `:5001` HTTPS
+   vhost. It also installs into every other server-level include directory
+   nginx.conf uses (`/usr/syno/share/nginx/conf.d/dsm.*.conf`, `www.*.conf`, …),
+   skipping any copy that `nginx -t` rejects because the `location` would be a
+   duplicate. Without a matching directory it writes
+   `/etc/nginx/conf.d/dsm.synoterm.conf` and prints the include line for the
+   manual step, naming the vhosts;
 2. runs `nginx -t` and **removes the files again if nginx rejects it** — a
    broken snippet can never take the DSM UI down;
 3. restarts nginx (`synosystemctl restart nginx`, with fallbacks);
@@ -586,8 +589,13 @@ tail -n 200 /var/packages/synoterm/var/runtime/synoterm.log
 tail -n 200 /var/log/nginx/error.log
 ls -l /var/packages/synoterm/target/bin/synoterm     # expect -rwsr-x--- root package
 /usr/syno/bin/synopkg status synoterm
-grep -n synoterm /etc/nginx/conf.d/*.conf /etc/nginx/nginx.conf 2>/dev/null
+ls -l /etc/nginx/conf.d/dsm.synoterm.conf      # the file the helper installs
+grep -n 'conf.d/dsm\.\*' /etc/nginx/nginx.conf  # the include that loads it
 ```
+
+A file called `/etc/nginx/conf.d/synoterm.conf` is **not** loaded: DSM's server
+blocks include `conf.d/dsm.*.conf`, so the name has to start with `dsm.`. The
+installer warns about such a leftover and suggests removing it.
 
 Plus the browser's Network tab entry for `GET /synoterm/ws` (status code) and
 the exact response body of a rejected upgrade.

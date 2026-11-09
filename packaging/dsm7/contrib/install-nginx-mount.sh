@@ -10,10 +10,12 @@
 # from your own root shell instead.
 #
 # What it does:
-#   1. drops a `location` file into every directory nginx already includes
-#      *inside a server block* (so both the :5000 HTTP and the :5001 HTTPS
-#      vhost get it), or, if there is no such directory, writes a stable file
-#      and prints the include line to add by hand;
+#   1. writes /etc/nginx/conf.d/dsm.synoterm.conf — the directory DSM keeps its
+#      own per-app `location` conf in, and the `dsm.*.conf` name matches the
+#      `include conf.d/dsm.*.conf;` line every desktop server block has, so one
+#      file covers the :5000 HTTP and the :5001 HTTPS vhost. Other server-level
+#      include directories are filled too, and a copy that would duplicate the
+#      location is rejected by `nginx -t` and removed again;
 #   2. validates with `nginx -t` and removes the file again if nginx rejects it;
 #   3. probes /synoterm/healthz on *every* vhost nginx serves and names the ones
 #      that still answer 404 instead of declaring success blindly.
@@ -26,9 +28,12 @@ set -eu
 PKG_DIR="${SYNOTERM_PKG_DIR:-/var/packages/synoterm/target}"
 SNIPPET="${PKG_DIR}/contrib/nginx/synoterm.conf"
 NGINX_CONF="${SYNOTERM_NGINX_CONF:-/etc/nginx/nginx.conf}"
-INCLUDE_DIR="/usr/local/etc/nginx/conf.d"
-INCLUDE_FILE="${INCLUDE_DIR}/synoterm.conf"
-BACKUP_DIR="/usr/local/etc/nginx"
+# Where DSM keeps the per-vhost `location` snippets of its own apps. The name
+# must match the include pattern nginx uses there: `include conf.d/dsm.*.conf;`
+# loads dsm.synoterm.conf and ignores a bare synoterm.conf.
+INCLUDE_DIR="/etc/nginx/conf.d"
+INCLUDE_FILE="${INCLUDE_DIR}/dsm.synoterm.conf"
+BACKUP_DIR="/etc/nginx"
 PORT="${SYNOTERM_PORT:-7381}"
 
 PKG_NAME="synoterm"
@@ -85,12 +90,84 @@ server_include_specs() {
         inc = $0
         sub(/^[[:space:]]*include[[:space:]]+/, "", inc)
         sub(/;.*/, "", inc)
+        gsub(/"/, "", inc)          # include "conf.d/dsm.*.conf";
         print inc
       }
       depth += n - m
       if (in_server && depth <= 0) { in_server = 0 }
     }
   ' "${NGINX_CONF}" | sort -u
+}
+
+# nginx resolves a relative `include` against its prefix — normally the
+# directory holding nginx.conf (`include conf.d/dsm.*.conf;`).
+NGINX_PREFIX="${SYNOTERM_NGINX_PREFIX:-$(dirname "${NGINX_CONF}")}"
+
+# DSM serves its own `location` snippets from these directories, and every
+# server { } block that serves the desktop includes one of the patterns:
+#
+#     include conf.d/dsm.*.conf;                            (/etc/nginx/conf.d)
+#     include /usr/syno/share/nginx/conf.d/dsm.*.conf;
+#
+# `/etc/nginx/conf.d` is where DSM puts the conf of its own apps (and of the
+# packages that get a web-config worker), so it is the first choice; the file
+# there is named dsm.synoterm.conf so the `dsm.*.conf` pattern picks it up in
+# *both* the :5000 and the :5001 vhost — one root run, no nginx.conf edit.
+KNOWN_INCLUDE_DIRS="/etc/nginx/conf.d
+${NGINX_PREFIX}/conf.d
+/usr/syno/share/nginx/conf.d
+/usr/syno/etc/nginx/conf.d
+/usr/local/etc/nginx/conf.d"
+KNOWN_INCLUDE_PATTERNS="dsm.*.conf www.*.conf"
+
+resolve_include_dir() { # resolve_include_dir <directory from an include line>
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    "") printf '%s\n' "${NGINX_PREFIX}" ;;
+    *) printf '%s\n' "${NGINX_PREFIX}/$1" ;;
+  esac
+}
+
+# Every place a file of ours can be picked up by a server { } block, best first
+# (dsm.* before www.* before anything else).
+include_candidates() {
+  {
+    server_include_specs | while IFS= read -r spec; do
+      [ -n "${spec}" ] || continue
+      printf '%s/%s\n' "$(resolve_include_dir "${spec%/*}")" "${spec##*/}"
+    done
+    # The documented DSM defaults, in case nginx.conf spells the include in a
+    # way the parser above does not recognise. Used only when nginx.conf really
+    # mentions the pattern and the directory exists — the probes in section 4
+    # are the final judge.
+    for dir in ${KNOWN_INCLUDE_DIRS}; do
+      [ -d "${dir}" ] || continue
+      for pattern in ${KNOWN_INCLUDE_PATTERNS}; do
+        grep -qF "${pattern}" "${NGINX_CONF}" 2>/dev/null || continue
+        printf '%s/%s\n' "${dir}" "${pattern}"
+      done
+    done
+  } | awk '!seen[$0]++' |
+    awk '{ print ($0 ~ /\/dsm\./ ? "0\t" : "1\t") $0 }' |
+    sort | cut -f2-
+}
+
+# A file in one of those directories that matches no include pattern is dead
+# weight — the classic case being /etc/nginx/conf.d/synoterm.conf, which DSM
+# never loads. Say so instead of letting it look installed.
+warn_about_unused_copies() {
+  for dir in ${KNOWN_INCLUDE_DIRS}; do
+    [ -d "${dir}" ] || continue
+    for stale in "${dir}"/*synoterm*.conf; do
+      [ -f "${stale}" ] || continue
+      case "${stale##*/}" in
+        dsm.*|www.*) continue ;;  # matches a pattern nginx includes
+      esac
+      echo "warn: ${stale} is not matched by any include pattern in ${NGINX_CONF}" >&2
+      echo "      (nginx loads dsm.*.conf / www.*.conf there, not a bare name) — delete it:" >&2
+      echo "          rm ${stale}" >&2
+    done
+  done
 }
 
 # ---- 2. install the snippet into every server-level include directory ------
@@ -104,20 +181,6 @@ copy_snippet() { # copy_snippet <destination>
   echo "==> installed $1"
 }
 
-for spec in $(server_include_specs); do
-  dir="${spec%/*}"
-  base="${spec##*/}"
-  case "${base}" in
-    *"*"*) ;;
-    *) continue ;;  # a fixed filename we must not hijack
-  esac
-  [ -d "${dir}" ] || continue
-  dest="${dir}/${base%%\**}${PKG_NAME}${base#*\*}"
-  case " ${INSTALLED} " in *" ${dest} "*) continue ;; esac
-  copy_snippet "${dest}"
-  INSTALLED="${INSTALLED} ${dest}"
-done
-
 rollback() {
   local file
   for file in ${INSTALLED}; do
@@ -126,19 +189,45 @@ rollback() {
   done
 }
 
+nginx_ok() { nginx -t >/dev/null 2>&1; }
+
+# Install into every candidate, but keep only copies that nginx accepts: if two
+# include lines are active in the same server block, a second `location
+# /synoterm/` is a duplicate-location error, and `nginx -t` catches it before
+# the UI is ever touched.
+warn_about_unused_copies
 NEEDS_INCLUDE=0
+for spec in $(include_candidates); do
+  dir="${spec%/*}"
+  base="${spec##*/}"
+  [ -d "${dir}" ] || continue
+  case "${base}" in
+    *"*"*) dest="${dir}/${base%%\**}${PKG_NAME}${base#*\*}" ;;
+    *"${PKG_NAME}"*) dest="${dir}/${base}" ;;  # a fixed name that is ours
+    *) continue ;;                              # a fixed name we must not hijack
+  esac
+  case " ${INSTALLED} " in *" ${dest} "*) continue ;; esac
+  install -m 644 "${SNIPPET}" "${dest}" || continue
+  if nginx_ok; then
+    echo "==> installed ${dest}"
+    INSTALLED="${INSTALLED} ${dest}"
+  else
+    rm -f "${dest}"
+    echo "    skipped ${dest}: nginx rejects it — another copy already defines /${PKG_NAME}/" >&2
+  fi
+done
+
 if [ -z "${INSTALLED}" ]; then
-  # ---- 2b. no server-level include dir: ship the file, print the edit -------
+  # ---- 2b. nothing to hook into: ship the file, print the edit --------------
   mkdir -p "${INCLUDE_DIR}"
   copy_snippet "${INCLUDE_FILE}"
   INSTALLED="${INCLUDE_FILE}"
   NEEDS_INCLUDE=1
-fi
-
-if ! verify_nginx; then
-  rollback
-  echo "DSM's configuration is unchanged." >&2
-  exit 1
+  if ! verify_nginx; then
+    rollback
+    echo "DSM's configuration is unchanged." >&2
+    exit 1
+  fi
 fi
 
 if [ "${NEEDS_INCLUDE}" -eq 1 ]; then

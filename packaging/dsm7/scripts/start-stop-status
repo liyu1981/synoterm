@@ -60,10 +60,12 @@ resolve_bind() {
   case "${BIND}" in
     0.0.0.0|127.0.0.1) printf '%s\n' "${BIND}"; return 0 ;;
   esac
-  for candidate in /usr/local/etc/nginx/conf.d/synoterm.conf \
-                   /usr/syno/etc/nginx/conf.d/synoterm.conf \
-                   /usr/syno/etc/nginx/conf.d/www.synoterm.conf \
-                   /etc/nginx/conf.d/synoterm.conf; do
+  # The helper names its file after the include pattern DSM uses there
+  # (dsm.*.conf -> dsm.synoterm.conf), so match the name, not one fixed path.
+  for candidate in /etc/nginx/conf.d/*synoterm*.conf \
+                   /usr/syno/share/nginx/conf.d/*synoterm*.conf \
+                   /usr/syno/etc/nginx/conf.d/*synoterm*.conf \
+                   /usr/local/etc/nginx/conf.d/*synoterm*.conf; do
     [ -f "${candidate}" ] && { printf '127.0.0.1\n'; return 0; }
   done
   printf '0.0.0.0\n'

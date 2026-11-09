@@ -41,8 +41,8 @@ if [ -n "${LANIP}" ]; then
 fi
 
 say "nginx mount"
-run "ls -l /usr/local/etc/nginx/conf.d/*synoterm* /usr/syno/etc/nginx/conf.d/*synoterm* /etc/nginx/conf.d/*synoterm* 2>/dev/null || echo 'no snippet installed'"
-run "grep -n synoterm /etc/nginx/nginx.conf 2>/dev/null || echo 'no include line in nginx.conf'"
+run "ls -l /etc/nginx/conf.d/*synoterm* /usr/syno/share/nginx/conf.d/*synoterm* /usr/syno/etc/nginx/conf.d/*synoterm* /usr/local/etc/nginx/conf.d/*synoterm* 2>/dev/null || echo 'no snippet installed'"
+run "grep -n 'synoterm\|conf.d/dsm\.\*' /etc/nginx/nginx.conf 2>/dev/null || echo 'no include line in nginx.conf'"
 run "nginx -t 2>&1 | tail -2"
 
 say "mount per vhost"

@@ -13,9 +13,10 @@ removed=0
 # The installer names the file after the include pattern DSM uses there (e.g.
 # www.*.conf → www.synoterm.conf), so match the pattern, not one fixed name.
 for dir in \
+  /etc/nginx/conf.d \
+  /usr/syno/share/nginx/conf.d \
   /usr/syno/etc/nginx/conf.d \
   /usr/local/etc/nginx/conf.d \
-  /etc/nginx/conf.d \
   /etc/nginx/sites-enabled
 do
   [ -d "${dir}" ] || continue
