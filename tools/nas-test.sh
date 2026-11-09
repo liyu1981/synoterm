@@ -365,7 +365,7 @@ else
       why "ends, which is why a 'nohup … &' server dies instantly."
 
       # A server left over from an interrupted run keeps the port *and* the old
-      # inode, so it keeps serving the old build (no /healthz, old token) while
+      # inode, so it keeps serving the old build (no /synoterm/healthz, old token) while
       # the freshly copied file sits unused on disk. Kill the exact process that
       # owns the port (pkill -f would also match our own command line), then
       # pick a port that is really free.
@@ -405,12 +405,13 @@ else
       ssh "${SSH_OPTS[@]}" "${TARGET}" \
         "cd '${REMOTE_DIR}' && HOME='${REMOTE_DIR}' exec ./synoterm \
            --listen ${SMOKE_PORT} --bind ${SMOKE_BIND} --auth dev \
-           --dev-token '${DEV_TOKEN}' --web-root '${REMOTE_DIR}/web'" \
+           --dev-token '${DEV_TOKEN}' --web-root '${REMOTE_DIR}/web' \
+           --base-path /synoterm" \
         </dev/null >"${SMOKE_LOG}" 2>&1 &
       SERVER_SSH_PID=$!
 
-      SMOKE_URL="http://${NAS}:${SMOKE_PORT}/?t=${DEV_TOKEN}"
-      SMOKE_WS="ws://${NAS}:${SMOKE_PORT}/ws"
+      SMOKE_URL="http://${NAS}:${SMOKE_PORT}/synoterm/?t=${DEV_TOKEN}"
+      SMOKE_WS="ws://${NAS}:${SMOKE_PORT}/synoterm/ws"
 
       # Wait for the listener, from this machine (that also proves the LAN path).
       listening=0
@@ -436,15 +437,15 @@ else
       if [ "${smoke_ok}" -eq 1 ] && [ "${listening}" -eq 1 ]; then
         ok "dev server reachable from this machine on port ${SMOKE_PORT}"
         # Prove the copy that is running is the build we just made (an old
-        # binary would have no /healthz and the UI would report a 404).
-        smoke_health="$(on_nas "curl -sS --max-time 3 'http://127.0.0.1:${SMOKE_PORT}/healthz'" 2>/dev/null || true)"
+        # binary would have no /synoterm/healthz and the UI would report a 404).
+        smoke_health="$(on_nas "curl -sS --max-time 3 'http://127.0.0.1:${SMOKE_PORT}/synoterm/healthz'" 2>/dev/null || true)"
         case "${smoke_health}" in
           *'"ok":true'*) ok "remote build: $(printf '%s' "${smoke_health}" | tr -d '\n')" ;;
           "")
-            warn "the running server does not answer /healthz — a stale process may hold port ${SMOKE_PORT}"
+            warn "the running server does not answer /synoterm/healthz — a stale process may hold port ${SMOKE_PORT}"
             sed 's/^/    /' "${SMOKE_LOG}" | tail -n 5
             ;;
-          *) warn "unexpected /healthz answer: $(printf '%s' "${smoke_health}" | head -c 160)" ;;
+          *) warn "unexpected /synoterm/healthz answer: $(printf '%s' "${smoke_health}" | head -c 160)" ;;
         esac
         if [ "${SMOKE_BIND}" = "0.0.0.0" ]; then
           bold "  Open this from any machine on your LAN:"
@@ -467,7 +468,7 @@ else
         printf '\n  server output:\n'
         sed 's/^/    /' "${SMOKE_LOG}" | tail -n 15
         printf '\n  diagnostics on the NAS:\n'
-        on_nas "echo '  listeners:'; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -w ${SMOKE_PORT} | sed 's/^/    /' || echo '    (nothing on ${SMOKE_PORT})'; echo '  local curl:'; (curl -sS -o /dev/null -w '    HTTP %{http_code}\\n' --max-time 3 'http://127.0.0.1:${SMOKE_PORT}/' 2>&1 || true) | sed 's/^/    /'" 2>&1 | sed 's/^/  /'
+        on_nas "echo '  listeners:'; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -w ${SMOKE_PORT} | sed 's/^/    /' || echo '    (nothing on ${SMOKE_PORT})'; echo '  local curl:'; (curl -sS -o /dev/null -w '    HTTP %{http_code}\\n' --max-time 3 'http://127.0.0.1:${SMOKE_PORT}/synoterm/healthz' 2>&1 || true) | sed 's/^/    /'" 2>&1 | sed 's/^/  /'
         note "if the listener exists but the LAN cannot reach it, DSM's firewall"
         note "(Control Panel → Security → Firewall) is blocking port ${SMOKE_PORT}."
       fi

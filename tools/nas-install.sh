@@ -16,7 +16,7 @@
 #   3  log in to DSM to verify the result      (session is logged out at the end)
 #   4  build the .spk for the detected arch
 #   5  install it (sudo)                       (changes DSM)
-#   6  verify: status, setuid, nginx, /healthz, end-to-end terminal
+#   6  verify: status, setuid, nginx, /synoterm/healthz, end-to-end terminal
 #
 set -uo pipefail
 

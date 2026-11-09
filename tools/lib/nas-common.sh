@@ -500,7 +500,7 @@ nas_verify_install() { # nas_verify_install [end-to-end-ws-probe]
   local probe="${1:-yes}"
 
   if [ "${DRY_RUN}" -eq 1 ]; then
-    note "[dry-run] would check synopkg status, setuid mode, nginx mount, listener and /healthz"
+    note "[dry-run] would check synopkg status, setuid mode, nginx mount, listener and /synoterm/healthz"
     return 0
   fi
   if ! read_nas 'test -d /var/packages/synoterm' 2>/dev/null; then
@@ -518,9 +518,9 @@ nas_verify_install() { # nas_verify_install [end-to-end-ws-probe]
 
   # Default package: no DSM worker, the terminal listens on its own port.
   local health
-  health="$(curl -sS --max-time 8 "http://${NAS}:7381/healthz" 2>&1 || true)"
+  health="$(curl -sS --max-time 8 "http://${NAS}:7381/synoterm/healthz" 2>&1 || true)"
   case "${health}" in
-    *'"ok":true'*) ok "installed server answers http://${NAS}:7381/healthz: $(printf '%s' "${health}" | tr -d '\n')" ;;
+    *'"ok":true'*) ok "installed server answers http://${NAS}:7381/synoterm/healthz: $(printf '%s' "${health}" | tr -d '\n')" ;;
     "")
       warn "the installed server does not answer on port 7381"
       note "check the log above; a firewall rule may be blocking the port:"
@@ -542,8 +542,8 @@ nas_verify_install() { # nas_verify_install [end-to-end-ws-probe]
   if [ "${probe}" = "yes" ] && [ -n "${COOKIE_HEADER:-}" ]; then
     # Same request the browser makes: DSM-served page on :5000 → terminal on
     # :7381 of the same host, carrying the (host-scoped) DSM cookie + token.
-    trace "node tools/ws-test.mjs ws://${NAS}:7381/ws --cookie id=******** --token … --origin http://${NAS}:${DSM_PORT}"
-    (cd "${ROOT}" && node tools/ws-test.mjs "ws://${NAS}:7381/ws" \
+    trace "node tools/ws-test.mjs ws://${NAS}:7381/synoterm/ws --cookie id=******** --token … --origin http://${NAS}:${DSM_PORT}"
+    (cd "${ROOT}" && node tools/ws-test.mjs "ws://${NAS}:7381/synoterm/ws" \
       --cookie "${COOKIE_HEADER}" ${DSM_TOKEN:+--token "${DSM_TOKEN}"} \
       --origin "http://${NAS}:${DSM_PORT}" \
       --expect SYNOTERM_DSM_OK --timeout 15) ||

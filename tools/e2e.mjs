@@ -7,8 +7,8 @@
 // Requires a Chromium/Chrome binary. Discovery order:
 //   $SYNOTERM_CHROMIUM, playwright's cache, system chromium/chrome.
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -108,6 +108,8 @@ if (!ready) {
 }
 
 const failures = [];
+// Servers started by individual checks, killed in finally.
+const extraServers = [];
 // `chromiumPath` may be null: playwright then uses its own browser cache
 // (that is how CI runs it after `npx playwright install chromium`).
 const browser = await playwright.chromium.launch({
@@ -260,11 +262,74 @@ try {
     const idleStatus = await page.textContent("#status-text");
     if (!/connected/.test(idleStatus)) failures.push(`session dropped while idle: "${idleStatus}"`);
   }
+  // ---- packaged layout: one prefix for every endpoint ---------------------
+  // The package starts the binary with --base-path /synoterm and ships
+  // ui/web/config.js = { proxy: "/synoterm", port: … }. The UI must then use
+  // /synoterm/{healthz,status,ws} on whichever origin it ends up talking to,
+  // and the server must refuse the unprefixed paths. This is the layout that
+  // broke on a real NAS (probe 404 → silent fallback to another port), so it
+  // gets its own check with the same binary flags and the same config.
+  const pkgPort = String(Number(PORT) + 1);
+  const pkgRoot = mkdtempSync(join(tmpdir(), "synoterm-e2e-"));
+  cpSync(join(root, "frontend", "dist"), pkgRoot, { recursive: true });
+  writeFileSync(
+    join(pkgRoot, "config.js"),
+    `window.SYNOTERM_CONFIG = { proxy: "/synoterm", port: ${pkgPort} };\n`,
+  );
+  const pkgServer = spawn(
+    binary,
+    ["--listen", pkgPort, "--auth", "dev", "--web-root", pkgRoot, "--base-path", "/synoterm"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  extraServers.push(pkgServer);
+  const pkgUp = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 5000);
+    pkgServer.stderr.on("data", (chunk) => {
+      if (String(chunk).includes("listening")) {
+        clearTimeout(timer);
+        resolve(true);
+      }
+    });
+  });
+  if (!pkgUp) failures.push("prefixed server did not start");
+
+  const pkgBase = `http://127.0.0.1:${pkgPort}`;
+  const probe = async (path) => {
+    const response = await fetch(`${pkgBase}${path}`);
+    return { code: response.status, body: await response.text() };
+  };
+  const healthzPrefixed = await probe("/synoterm/healthz");
+  if (healthzPrefixed.code !== 200) failures.push(`/synoterm/healthz returned ${healthzPrefixed.code}`);
+  const healthzBare = await probe("/healthz");
+  if (healthzBare.code !== 404) failures.push(`/healthz outside the prefix returned ${healthzBare.code} (expected 404)`);
+  const statusPrefixed = await probe("/synoterm/status");
+  if (statusPrefixed.code !== 200) failures.push(`/synoterm/status returned ${statusPrefixed.code}`);
+  const pkgContext = await browser.newContext();
+  const pkgPage = await pkgContext.newPage();
+  pkgPage.on("pageerror", (error) => failures.push(`pageerror (prefixed): ${error}`));
+  await pkgPage.goto(`${pkgBase}/synoterm/`, { waitUntil: "load" });
+  await pkgPage.waitForFunction(
+    () => document.querySelector("#status-text")?.textContent?.startsWith("connected"),
+    { timeout: 8000 },
+  );
+  const chosen = await pkgPage.evaluate(() => window.synotermBackend);
+  if (chosen?.prefix !== "/synoterm") failures.push(`prefixed UI used prefix ${JSON.stringify(chosen)}`);
+  if (chosen?.mode !== "direct") failures.push(`prefixed UI chose mode ${chosen?.mode} (expected direct)`);
+  const pkgStatus = await pkgPage.evaluate(async () => {
+    const response = await fetch("/synoterm/status", { credentials: "same-origin" });
+    return { code: response.status, body: await response.json().catch(() => undefined) };
+  });
+  if (pkgStatus.code !== 200 || !pkgStatus.body?.ok) {
+    failures.push(`prefixed UI could not read /synoterm/status: ${JSON.stringify(pkgStatus)}`);
+  }
+  await pkgContext.close();
+  rmSync(pkgRoot, { recursive: true, force: true });
 } catch (error) {
   failures.push(String(error));
 } finally {
   await browser.close();
   server.kill("SIGTERM");
+  for (const extra of extraServers) extra.kill("SIGTERM");
 }
 
 if (failures.length > 0) {

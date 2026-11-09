@@ -32,16 +32,48 @@ run "netstat -ltnp 2>/dev/null | grep -w ${PORT} || echo 'nothing listening on $
 run "ss -ltnp 2>/dev/null | grep -w ${PORT} || true"
 
 say "backend probe"
-run "curl -sS --max-time 3 http://127.0.0.1:${PORT}/healthz || echo '127.0.0.1:${PORT} unreachable'"
+# Every endpoint lives under /${PKG}/ — behind the nginx mount and on the
+# package's own port alike.
+run "curl -sS --max-time 3 http://127.0.0.1:${PORT}/${PKG}/healthz || echo '127.0.0.1:${PORT}/${PKG}/healthz unreachable'"
 LANIP=$(ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1{split($4,a,"/"); print a[1]}')
 if [ -n "${LANIP}" ]; then
-  run "curl -sS --max-time 3 http://${LANIP}:${PORT}/healthz || echo '${LANIP}:${PORT} unreachable (firewall?)'"
+  run "curl -sS --max-time 3 http://${LANIP}:${PORT}/${PKG}/healthz || echo '${LANIP}:${PORT}/${PKG}/healthz unreachable (firewall?)'"
 fi
 
 say "nginx mount"
 run "ls -l /usr/local/etc/nginx/conf.d/*synoterm* /usr/syno/etc/nginx/conf.d/*synoterm* /etc/nginx/conf.d/*synoterm* 2>/dev/null || echo 'no snippet installed'"
 run "grep -n synoterm /etc/nginx/nginx.conf 2>/dev/null || echo 'no include line in nginx.conf'"
 run "nginx -t 2>&1 | tail -2"
+
+say "mount per vhost"
+# A location included by only one server { } block 404s on the others; that is
+# the difference between "the mount is installed" and "the mount works where
+# the browser actually is".
+DSM_LISTENS=$(awk '
+  /^[[:space:]]*#/ { next }
+  /^[[:space:]]*listen[[:space:]]/ {
+    line = $0
+    sub(/^[[:space:]]*listen[[:space:]]+/, "", line)
+    sub(/;.*/, "", line)
+    port = ""; scheme = "http"
+    n = split(line, a, /[[:space:]]+/)
+    for (i = 1; i <= n; i++) {
+      if (a[i] ~ /^[0-9]+$/) port = a[i]
+      if (a[i] == "ssl") scheme = "https"
+    }
+    if (port != "") print port, scheme
+  }
+' /etc/nginx/nginx.conf 2>/dev/null | sort -u)
+[ -n "${DSM_LISTENS}" ] || DSM_LISTENS="5000 http
+5001 https"
+printf '%s\n' "${DSM_LISTENS}" | while read -r port scheme; do
+  [ -n "${port}" ] || continue
+  if [ "${scheme}" = "https" ]; then
+    run "curl -sk -o /dev/null -w 'https 127.0.0.1:${port}/${PKG}/healthz -> %{http_code}\n' --max-time 3 https://127.0.0.1:${port}/${PKG}/healthz"
+  else
+    run "curl -s -o /dev/null -w 'http  127.0.0.1:${port}/${PKG}/healthz -> %{http_code}\n' --max-time 3 http://127.0.0.1:${port}/${PKG}/healthz"
+  fi
+done
 if [ -n "${LANIP}" ]; then
   run "curl -s -o /dev/null -w 'mount http://${LANIP}:5000/${PKG}/healthz -> %{http_code}\n' --max-time 3 http://${LANIP}:5000/${PKG}/healthz"
 fi

@@ -79,15 +79,16 @@ fi
 if [ -e "${WORK}/conf/resource" ]; then
   echo "  ok   conf/resource (privileged nginx mount — only installable when signed)"
   [ -e "${WORK}/payload/nginx/synoterm.conf" ] || { echo "  MISS payload/nginx/synoterm.conf"; fail=1; }
-  grep -q 'ws: "/synoterm/ws"' "${WORK}/payload/ui/web/config.js" || {
-    echo "  FAIL nginx-mount build must point the UI at /synoterm/ws"; fail=1; }
 else
   echo "  ok   no conf/resource (no internal worker)"
-  grep -q 'port:' "${WORK}/payload/ui/web/config.js" || {
-    echo "  FAIL ui/web/config.js needs the direct port as a fallback"; fail=1; }
-  grep -q 'proxy:' "${WORK}/payload/ui/web/config.js" || {
-    echo "  FAIL ui/web/config.js needs the /synoterm proxy path to prefer the mount"; fail=1; }
 fi
+
+# One bundle serves both transports: the prefix is fixed, only the origin moves.
+config_js="${WORK}/payload/ui/web/config.js"
+for expected in 'proxy: "/synoterm"' 'port:' 'httpsPort:'; do
+  grep -q "${expected}" "${config_js}" || {
+    echo "  FAIL ui/web/config.js must carry ${expected}"; fail=1; }
+done
 
 [ -x "${WORK}/payload/ui/auth-probe.cgi" ] || { echo "  FAIL ui/auth-probe.cgi must be executable"; fail=1; }
 

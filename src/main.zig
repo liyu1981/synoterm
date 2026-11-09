@@ -18,7 +18,7 @@ const max_static_bytes: usize = 32 * 1024 * 1024;
 /// Bumped whenever the HTTP/WS surface changes, so an old binary that is still
 /// running can be recognised (the UI reports it when /status is missing).
 const server_version = "0.1.3";
-const api_version: u32 = 3;
+const api_version: u32 = 4;
 
 pub const AuthMode = enum { dev, dsm };
 
@@ -38,7 +38,8 @@ pub const Config = struct {
     term: [:0]const u8 = "xterm-256color",
     max_sessions: u32 = 8,
     insecure_origin: bool = false,
-    /// URL prefix mounted by DSM's nginx (e.g. "/synoterm"); empty in dev.
+    /// Prefix every endpoint lives under (e.g. "/synoterm", used both behind
+    /// DSM's nginx mount and on the package's own port); empty in dev.
     base_path: []const u8 = "",
 };
 
@@ -145,7 +146,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     defer sys.close(listen_fd);
 
-    std.debug.print("synoterm {s} (api {d}, pid {d}) listening on http://{d}.{d}.{d}.{d}:{d}/ ({s})\n", .{
+    std.debug.print("synoterm {s} (api {d}, pid {d}) listening on http://{d}.{d}.{d}.{d}:{d}{s}/ ({s})\n", .{
         server_version,
         api_version,
         sys.currentPid(),
@@ -154,6 +155,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         cfg.bind_addr[2],
         cfg.bind_addr[3],
         cfg.bind_port,
+        std.mem.trimEnd(u8, cfg.base_path, "/"),
         @tagName(cfg.auth_mode),
     });
     const loopback_only = cfg.bind_addr[0] == 127 and cfg.bind_addr[1] == 0 and
@@ -200,7 +202,7 @@ fn usage() error{InvalidArguments} {
         \\  --shell <path>          fallback shell
         \\  --term <name>           TERM value (default xterm-256color)
         \\  --max-sessions <n>      concurrent terminal limit
-        \\  --base-path <prefix>    URL prefix mounted by DSM nginx (e.g. /synoterm)
+        \\  --base-path <prefix>    serve every endpoint under this prefix (e.g. /synoterm)
         \\  --insecure-origin       skip same-origin checks (dev only)
         \\
     , .{});
@@ -229,8 +231,13 @@ fn handleConnection(ctx: *Ctx, fd: sys.fd_t) void {
         return;
     };
 
-    const rel_path = stripBasePath(request.path, ctx.cfg.base_path) orelse {
-        http.sendError(allocator, fd, 404, "Not found");
+    const rel_path = underBasePath(request.path, ctx.cfg.base_path) orelse {
+        // One URL space: /synoterm/healthz, /synoterm/status, /synoterm/ws —
+        // behind the mount and on the package's own port alike.
+        const hint = std.fmt.allocPrint(allocator, "not found: every endpoint lives under {s}/", .{
+            std.mem.trimEnd(u8, ctx.cfg.base_path, "/"),
+        }) catch "Not found";
+        http.sendError(allocator, fd, 404, hint);
         return;
     };
 
@@ -343,17 +350,17 @@ fn isWebSocketUpgrade(request: http.Request) bool {
     return std.ascii.eqlIgnoreCase(upgrade, "websocket");
 }
 
-/// Strips the nginx mount prefix when present. A request outside the mount is
-/// passed through unchanged, so the same process serves both
+/// Removes the configured prefix from a request path. Requests outside it are
+/// refused (null), so there is exactly one endpoint space:
 ///   https://nas:5001/synoterm/…  (DSM nginx proxy, mounted by hand)
-///   http://nas:7381/…            (direct, no proxy)
-fn stripBasePath(path: []const u8, base_path: []const u8) ?[]const u8 {
+///   http://nas:7381/synoterm/…   (direct, package's own port)
+fn underBasePath(path: []const u8, base_path: []const u8) ?[]const u8 {
     const base = std.mem.trimEnd(u8, base_path, "/");
     if (base.len == 0) return path;
-    if (!std.mem.startsWith(u8, path, base)) return path;
+    if (std.mem.eql(u8, path, base)) return "/";
+    if (!std.mem.startsWith(u8, path, base)) return null;
     const rest = path[base.len..];
-    if (rest.len == 0) return "/";
-    if (rest[0] != '/') return path;
+    if (rest[0] != '/') return null;
     return rest;
 }
 
@@ -832,6 +839,19 @@ test "ipv4 parsing and query params" {
     try std.testing.expectEqual(@as(?[4]u8, null), parseIpv4("192.168.0.256"));
     try std.testing.expectEqualStrings("secret", queryParam("ws=/ws&t=secret", "t").?);
     try std.testing.expectEqual(@as(?[]const u8, null), queryParam("ws=/ws", "t"));
+}
+
+test "endpoints live under the configured prefix" {
+    // No prefix (dev): paths pass through unchanged.
+    try std.testing.expectEqualStrings("/healthz", underBasePath("/healthz", "").?);
+    // Behind the mount and on the direct port alike.
+    try std.testing.expectEqualStrings("/healthz", underBasePath("/synoterm/healthz", "/synoterm").?);
+    try std.testing.expectEqualStrings("/ws", underBasePath("/synoterm/ws", "/synoterm/").?);
+    try std.testing.expectEqualStrings("/", underBasePath("/synoterm", "/synoterm").?);
+    // Anything outside the prefix, or a bare lookalike, is refused.
+    try std.testing.expectEqual(@as(?[]const u8, null), underBasePath("/healthz", "/synoterm"));
+    try std.testing.expectEqual(@as(?[]const u8, null), underBasePath("/synotermfoo/ws", "/synoterm"));
+    try std.testing.expectEqual(@as(?[]const u8, null), underBasePath("/", "/synoterm"));
 }
 
 test "request parsing" {

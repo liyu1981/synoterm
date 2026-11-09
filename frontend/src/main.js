@@ -86,12 +86,6 @@ function applyFont(term, fit) {
   requestAnimationFrame(() => fit());
 }
 
-/** Base path of the app ("/synoterm" in DSM, "" in dev). */
-function appBase() {
-  const path = window.location.pathname.replace(/\/index\.html$/, "");
-  return path.replace(/\/$/, "");
-}
-
 /**
  * Where the terminal backend lives.
  *
@@ -101,16 +95,53 @@ function appBase() {
  * port-scoped, so the browser adds the DSM session cookie to the cross-port
  * request — no reverse proxy and no extra login are needed.
  *
- * Resolution order:
- *   1. window.SYNOTERM_CONFIG.port  → http(s)://<same host>:<port>
- *   2. window.SYNOTERM_CONFIG.ws    → explicit websocket URL/path
- *   3. ?ws=…                        (injected by the DSM 7.2 Vue wrapper)
- *   4. derived from the page URL    (dev server, same origin)
+ * Every endpoint lives under one prefix (`/synoterm`) in both transports:
+ *   proxy   → https://nas:5001/synoterm/{healthz,status,ws}   (nginx mount)
+ *   direct  → http://nas:7381/synoterm/{healthz,status,ws}    (own port)
+ * so switching transports never changes the paths, only the origin.
  */
-let backend = null; // { base, mode }
+let backend = null; // { origin, prefix, mode }
+
+function apiConfig() {
+  return window.SYNOTERM_CONFIG || {};
+}
+
+/** Prefix every endpoint lives under: "/synoterm" in DSM, "" in dev. */
+function apiPrefix() {
+  const proxy = apiConfig().proxy;
+  return typeof proxy === "string" ? proxy.replace(/\/+$/, "") : "";
+}
+
+function backendOrigin() {
+  return backend ? backend.origin : window.location.origin;
+}
+
+/** Origin + prefix, e.g. "https://nas:5001/synoterm". */
+function backendBase() {
+  return backendOrigin() + apiPrefix();
+}
+
+function chooseBackend(origin, mode) {
+  backend = { origin, prefix: apiPrefix(), mode };
+  window.synotermBackend = backend; // handy in the browser console / support
+  console.info(`synoterm: backend ${mode} — ${backendBase()}`);
+  return backend;
+}
+
+async function healthzAnswers(origin, credentials) {
+  try {
+    const response = await fetch(`${origin}${apiPrefix()}/healthz`, {
+      credentials,
+      cache: "no-store",
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
 
 /**
- * Picks the backend endpoint once, then caches it.
+ * Picks the backend origin once, then caches it.
  *
  * The package can be reached two ways:
  *   1. same-origin through DSM's nginx mount (/synoterm/), applied by hand with
@@ -118,80 +149,66 @@ let backend = null; // { base, mode }
  *   2. directly on the package's own port (http://nas:7381/) — works without any
  *      DSM configuration, but the page must come from DSM (or the same host)
  *
- * A cheap same-origin probe of <proxy>/healthz decides which is available; the
+ * A cheap probe of <origin>/synoterm/healthz decides which is available; the
  * result is only a transport choice, authentication is unchanged either way.
  */
 async function resolveBackend() {
   if (backend) {
-    window.synotermBackend = backend; // handy in the browser console / support
-    return backend;
-  }
-  const config = window.SYNOTERM_CONFIG || {};
-  const proxy = typeof config.proxy === "string" ? config.proxy.replace(/\/$/, "") : "";
-
-  // Already talking to our own server? Then stay same-origin.
-  if (Number.isFinite(config.port) && String(config.port) === window.location.port) {
-    backend = { base: window.location.origin + appBase(), mode: "direct" };
     window.synotermBackend = backend;
     return backend;
   }
+  const config = apiConfig();
+  const prefix = apiPrefix();
 
-  if (proxy) {
-    try {
-      const response = await fetch(`${proxy}/healthz`, { credentials: "same-origin", cache: "no-store" });
-      if (response.ok) {
-        backend = { base: proxy, mode: "proxy" };
-        window.synotermBackend = backend;
-        return backend;
-      }
-    } catch {
-      /* no mount: fall through to the package's own port */
+  // Already talking to our own server? Then stay on this origin.
+  if (Number.isFinite(config.port) && String(config.port) === window.location.port) {
+    return chooseBackend(window.location.origin, "direct");
+  }
+
+  // 1. the mount on the origin that served this page (the normal case).
+  if (prefix && (await healthzAnswers(window.location.origin, "same-origin"))) {
+    return chooseBackend(window.location.origin, "proxy");
+  }
+
+  // 2. the same mount on DSM's HTTPS vhost. DSM is often opened on :5000 while
+  //    the mount only exists on the HTTPS server block; the paths are identical,
+  //    so the terminal can still use it — but cookies may not travel from an
+  //    http page, hence the hint below.
+  const httpsPort = Number.isFinite(config.httpsPort) ? config.httpsPort : 5001;
+  if (prefix && window.location.protocol === "http:" && String(httpsPort) !== window.location.port) {
+    const origin = `https://${window.location.hostname}:${httpsPort}`;
+    if (await healthzAnswers(origin, "include")) {
+      console.warn(
+        `synoterm: DSM is open over HTTP but the mount lives on ${origin} — ` +
+          `reopen DSM at ${origin}/ for session cookies to be sent`,
+      );
+      return chooseBackend(origin, "proxy-https");
     }
   }
 
-  if (typeof config.base === "string" && config.base.length > 0) {
-    backend = { base: config.base, mode: "config" };
-    window.synotermBackend = backend;
-    return backend;
-  }
+  // 3. no mount anywhere: talk to the package's own port.
   if (Number.isFinite(config.port) && config.port > 0) {
-    backend = {
-      base: `${window.location.protocol}//${window.location.hostname}:${config.port}`,
-      mode: "direct",
-    };
-    window.synotermBackend = backend;
-    return backend;
+    return chooseBackend(`${window.location.protocol}//${window.location.hostname}:${config.port}`, "direct");
   }
-  backend = { base: window.location.origin + appBase(), mode: "same-origin" };
-  window.synotermBackend = backend;
-  return backend;
-}
-
-function backendBase() {
-  return backend ? backend.base : window.location.origin + appBase();
+  return chooseBackend(window.location.origin, "same-origin");
 }
 
 function wsUrl() {
-  const config = window.SYNOTERM_CONFIG || {};
-  if (typeof config.ws === "string" && config.ws.length > 0) {
-    return config.ws.startsWith("ws://") || config.ws.startsWith("wss://")
+  const config = apiConfig();
+  // An explicit path (`?ws=/synoterm/ws`, injected by a DSM wrapper) already
+  // contains the prefix; only its origin is ours to choose.
+  const explicit =
+    typeof config.ws === "string" && config.ws.length > 0
       ? config.ws
-      : `${backendBase()}${config.ws}`;
+      : new URLSearchParams(window.location.search).get("ws");
+  if (explicit) {
+    if (explicit.startsWith("ws://") || explicit.startsWith("wss://")) return explicit;
+    return backendOrigin().replace(/^http/, "ws") + explicit;
   }
-  const injected = new URLSearchParams(window.location.search).get("ws");
-  if (injected) return `${window.location.origin}${injected}`;
-  const base = backendBase();
-  return base.replace(/^http/, "ws") + "/ws";
+  return backendBase().replace(/^http/, "ws") + "/ws";
 }
 
-/**
- * HTTP API base for control endpoints (/status, /healthz).
- *
- * Derived from the *WebSocket* path, not from the page URL: with the DSM
- * package the page is served from /webman/3rdparty/<pkg>/web/ while the API
- * lives behind the nginx mount /synoterm/, so using the page path made /status
- * 404 exactly where it was most needed.
- */
+/** HTTP API path for control endpoints (healthz, status), e.g. /synoterm/status. */
 function apiPath(name) {
   return `${backendBase()}/${name}`;
 }

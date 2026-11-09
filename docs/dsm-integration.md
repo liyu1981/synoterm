@@ -112,15 +112,21 @@ sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh
 
 What that script does (`contrib/install-nginx-mount.sh`):
 
-1. finds a directory nginx already includes **inside a `server { }` block**
-   (`include …/www.*.conf;` → it writes `www.synoterm.conf` so the pattern
-   matches), or, if there is none, writes
-   `/usr/local/etc/nginx/conf.d/synoterm.conf` and prints the one-line edit;
-2. runs `nginx -t` and **removes the file again if nginx rejects it** — a broken
-   snippet can never take the DSM UI down;
+1. finds **every** directory nginx already includes *inside a `server { }`
+   block* (`include …/www.*.conf;` → it writes `www.synoterm.conf` so the
+   pattern matches) and installs the snippet in all of them — DSM's `:5000`
+   HTTP and `:5001` HTTPS vhosts are separate blocks, and a `location` included
+   by only one of them 404s on the other. If there is no such directory it
+   writes `/usr/local/etc/nginx/conf.d/synoterm.conf` and prints the include
+   line to add by hand, naming the vhosts;
+2. runs `nginx -t` and **removes the files again if nginx rejects it** — a
+   broken snippet can never take the DSM UI down;
 3. restarts nginx (`synosystemctl restart nginx`, with fallbacks);
-4. probes `http://127.0.0.1:7381/healthz` and
-   `https://127.0.0.1:5001/synoterm/healthz`.
+4. probes `http://127.0.0.1:7381/synoterm/healthz` and
+   `/synoterm/healthz` on **each `listen` port in nginx.conf** (http and https),
+   printing a line per vhost and exiting non-zero if a vhost that serves the DSM
+   desktop (`/webman/`) still answers 404. "Installed" and "works where the
+   browser is" are different things; the script checks the second one.
 
 Undo: `sudo /var/packages/synoterm/target/contrib/uninstall-nginx-mount.sh`.
 
@@ -133,18 +139,28 @@ mode "proxy"  (mount applied — preferred)
 
 mode "direct" (no mount)
   http://nas:5000/webman/3rdparty/synoterm/web/   UI served by DSM's webman
-      └─ ws://nas:7381/ws                         own port; the DSM cookie is sent
-                                                  anyway (cookies are host-scoped)
+      └─ http://nas:7381/synoterm/ws              own port; the DSM cookie is
+                                                  sent anyway (host-scoped)
 ```
 
-`ui/web/config.js` carries both (`{ proxy: "/synoterm", port: 7381 }`) and the
-bundle probes `<proxy>/healthz` once, then caches the choice; the current mode is
-visible in the browser console as `window.synotermBackend`.
+The **paths never change**, only the origin: `/synoterm/healthz`,
+`/synoterm/status`, `/synoterm/ws` in both modes. `ui/web/config.js` carries
+`{ proxy: "/synoterm", port: 7381, httpsPort: 5001 }`; the bundle probes
+`<origin>/synoterm/healthz` once and caches the choice:
+
+1. the origin that served the page (the normal case);
+2. `https://<host>:<httpsPort>/synoterm/…` if the page is on plain HTTP — DSM is
+   often opened on `:5000` while the mount only exists on the HTTPS vhost
+   (reopen DSM over HTTPS in that case: browsers may withhold the session cookie
+   from a cross-scheme request);
+3. the package's own port, `/synoterm/ws` on `:7381`.
+
+The current choice is visible in the browser console as `window.synotermBackend`.
 
 Notes:
 
-* `synoterm` runs with `--base-path /synoterm` but *also* answers on `/`, so one
-  process serves both modes.
+* `synoterm` runs with `--base-path /synoterm` and serves **only** that prefix;
+  `/healthz` or `/ws` outside it answer 404, in every transport.
 * **Direct mode is HTTP-only in practice.** If DSM is served over HTTPS, an
   `https://` page cannot open `ws://`, so apply the mount (or configure DSM's own
   reverse proxy, §4.2).
@@ -168,9 +184,7 @@ looks for the token, recording every source it tried in
 4. the package's own `ui/auth-probe.cgi` (diagnostic, see below),
 5. cookies visible to the page.
 
-If the token cannot be found the backend answers
-`401 DSM rejected the session - the SynoToken was not presented`, and the UI prints
-`no DSM token found`. To see what DSM offers on a given build, open:
+To see what DSM offers on a given build, open:
 
 ```
 http://<nas>:5000/webman/3rdparty/synoterm/auth-probe.cgi
@@ -411,9 +425,9 @@ Uninstalling has the same worker restriction on some builds — use
 [ ] spk installs on DSM 7.1; Package Center shows "Terminal" with the icon
 [ ] menu icon opens the terminal (url style, default build)
 [ ] ui/web assets load from /webman/3rdparty/synoterm/web/
-[ ] ui/web/config.js points the socket at /synoterm/ws
+[ ] ui/web/config.js carries `proxy: "/synoterm"`, `port`, `httpsPort`
 [ ] /synoterm/ws upgrades (browser devtools: 101 Switching Protocols)
-[ ] authenticate.cgi returns the logged-in admin account (cookie only)
+[ ] `X-Syno-Token` + cookie make authenticate.cgi return the account (`/synoterm/status` 200)
 [ ] if not: SYNOTERM_UI_STYLE=vue build works (DSM 7.2) and carries the token
 [ ] ls -l /var/packages/synoterm/target/bin/synoterm  → -rwsr-x--- root package
 [ ] inside terminal: id / whoami / pwd / echo $HOME are the DSM user

@@ -1,7 +1,19 @@
 # WebSocket protocol (v1)
 
-One WebSocket per terminal tab. The endpoint is `/ws` relative to the mount
-point (`/synoterm/ws` in DSM, `/ws` in dev).
+One WebSocket per terminal tab.
+
+**One URL space, one prefix.** Every endpoint lives under the base path, which is
+`/synoterm` with the DSM package (behind the nginx mount *and* on the package's
+own port) and empty in dev:
+
+| | package | dev |
+| --- | --- | --- |
+| WebSocket | `/synoterm/ws` | `/ws` |
+| health | `/synoterm/healthz` | `/healthz` |
+| status | `/synoterm/status` | `/status` |
+
+A request outside the base path is refused with `404` — the process never
+silently serves a second, unprefixed endpoint space.
 
 * Transport: RFC 6455 over the DSM origin (`wss://nas:5001/synoterm/ws`).
 * No subprotocol is required, but clients **may** offer
@@ -99,23 +111,27 @@ Rejection responses (plain HTTP, before the upgrade):
 | --- | --- |
 | 401 | no valid DSM session |
 | 403 | cross-origin, or account not in the required group |
-| 404 | upgrade on a path other than `/ws` |
+| 404 | upgrade on a path other than the base path + `/ws` |
 | 429 | session limit reached |
 | 500 | `authenticate.cgi` failed / binary lacks the setuid privilege |
 
 ## 5. Plain HTTP endpoints
 
+All paths below are relative to the base path (`/synoterm` in the package).
+
 | Path | Purpose |
 | --- | --- |
-| `GET /healthz` | `{"ok":true}` — reachability probe, no auth |
-| `GET /status` | runs the **same** origin/auth/policy checks as the upgrade and returns `{"ok":true,"user":"…","sessions":n,"max_sessions":n}` or `{"ok":false,"code":401,"reason":"…"}` |
+| `GET …/healthz` | `{"ok":true,"version":"…","api":n}` — reachability probe, no auth |
+| `GET …/status` | runs the **same** origin/auth/policy checks as the upgrade and returns `{"ok":true,"user":"…","sessions":n,"max_sessions":n}` or `{"ok":false,"code":401,"reason":"…"}` |
 
-`/status` exists because a browser cannot read the status code of a failed
-WebSocket handshake: when a connection drops, the UI fetches `/status` and shows
-the reason ("test token missing or stale — reload the URL printed by
-nas-test.sh", "no DSM session", "this account is not allowed…") instead of an
-endless `disconnected, retrying in 1s…` loop. Non-browser clients (curl) may call
-`/status` without an `Origin` header; the WebSocket upgrade itself is strict.
+`…/status` exists because a browser cannot read the status code of a failed
+WebSocket handshake: when a connection drops, the UI fetches it and shows the
+reason ("test token missing or stale — reload the URL printed by nas-test.sh",
+"no DSM session", "this account is not allowed…") instead of an endless
+`disconnected, retrying in 1s…` loop.
+
+Non-browser clients (curl) may call `…/status` without an `Origin` header; the
+WebSocket upgrade itself is strict.
 
 ## 6. Framing rules
 

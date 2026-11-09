@@ -10,17 +10,21 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 removed=0
-for candidate in \
-  /usr/syno/etc/nginx/conf.d/synoterm.conf \
-  /etc/nginx/conf.d/synoterm.conf \
-  /usr/local/etc/nginx/conf.d/synoterm.conf \
-  /etc/nginx/sites-enabled/synoterm.conf
+# The installer names the file after the include pattern DSM uses there (e.g.
+# www.*.conf → www.synoterm.conf), so match the pattern, not one fixed name.
+for dir in \
+  /usr/syno/etc/nginx/conf.d \
+  /usr/local/etc/nginx/conf.d \
+  /etc/nginx/conf.d \
+  /etc/nginx/sites-enabled
 do
-  if [ -f "${candidate}" ]; then
+  [ -d "${dir}" ] || continue
+  for candidate in "${dir}"/*synoterm*.conf; do
+    [ -f "${candidate}" ] || continue
     echo "==> removing ${candidate}"
     rm -f "${candidate}"
     removed=1
-  fi
+  done
 done
 
 [ "${removed}" -eq 1 ] || echo "nothing to remove (no synoterm.conf found)"

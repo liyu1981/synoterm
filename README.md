@@ -79,7 +79,7 @@ sudo /var/packages/synoterm/target/contrib/diagnose.sh
 
 ```
 DSM desktop (http://nas:5000)
-  Terminal window (iframe)  ⇄  ws://nas:7381/ws  (or /synoterm/ws via nginx)
+  Terminal window (iframe)  ⇄  /synoterm/ws  (nginx mount, or the package port)
        xterm.js
                               │ DSM cookie + SynoToken
                               ▼

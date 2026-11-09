@@ -36,7 +36,9 @@ if (watch) {
 
 cpSync(join(here, "src/index.html"), join(outdir, "index.html"));
 // Runtime configuration. The DSM packaging step overwrites this with the
-// nginx mount path (e.g. "/synoterm/ws"); empty means "derive from the URL".
+// endpoint prefix and the package's own port
+// ({ proxy: "/synoterm", port: 7381, httpsPort: 5001 }); empty means
+// "dev server, endpoints at the page origin without a prefix".
 writeFileSync(
   join(outdir, "config.js"),
   'window.SYNOTERM_CONFIG = {};\n',

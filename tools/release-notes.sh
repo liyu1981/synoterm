@@ -80,7 +80,7 @@ the helper reports that the snippet changed.
 sudo /var/packages/synoterm/target/contrib/diagnose.sh
 ```
 
-Reports package state, the setuid mode, the bind address and listener, `/healthz`
+Reports package state, the setuid mode, the bind address and listener, `/synoterm/healthz`
 on loopback and LAN, the nginx snippet and `nginx -t`, and the service log. The
 terminal UI also names its transport (`window.synotermBackend` → `proxy` or
 `direct`).

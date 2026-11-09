@@ -99,9 +99,13 @@ cp "${ROOT}"/frontend/dist/* "${PAYLOAD}/ui/web/"
 # Tell the bundle where the backend is. It cannot be derived from the page URL:
 # with the package the page is served by DSM (/webman/3rdparty/synoterm/web/)
 # while the terminal listens on its own port of the same host.
-# The UI prefers the same-origin mount when it answers and falls back to the
-# package's own port, so one bundle works with and without the manual step.
-printf 'window.SYNOTERM_CONFIG = { proxy: "/synoterm", port: 7381 };\n' > "${PAYLOAD}/ui/web/config.js"
+#
+#   proxy      path prefix every endpoint lives under, in *both* transports
+#              (/synoterm/healthz, /synoterm/status, /synoterm/ws)
+#   port       the package's own port, used when no nginx mount answers
+#   httpsPort  DSM's HTTPS vhost: DSM is often opened on :5000 while the mount
+#              only exists on the HTTPS server block, so the UI probes it too
+printf 'window.SYNOTERM_CONFIG = { proxy: "/synoterm", port: 7381, httpsPort: 5001 };\n' > "${PAYLOAD}/ui/web/config.js"
 
 # Diagnostic CGI (webman executes *.cgi from the package's ui dir). Harmless at
 # runtime; it tells us what DSM hands to a package CGI on this build.
