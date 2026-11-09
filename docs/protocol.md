@@ -123,6 +123,7 @@ All paths below are relative to the base path (`/synoterm` in the package).
 | --- | --- |
 | `GET …/healthz` | `{"ok":true,"version":"…","api":n}` — reachability probe, no auth |
 | `GET …/status` | runs the **same** origin/auth/policy checks as the upgrade and returns `{"ok":true,"user":"…","sessions":n,"max_sessions":n}` or `{"ok":false,"code":401,"reason":"…"}` |
+| `OPTIONS …/status` | CORS preflight for the cross-port case; allows `X-Syno-Token` |
 
 `…/status` exists because a browser cannot read the status code of a failed
 WebSocket handshake: when a connection drops, the UI fetches it and shows the
@@ -130,8 +131,18 @@ reason ("test token missing or stale — reload the URL printed by nas-test.sh",
 "no DSM session", "this account is not allowed…") instead of an endless
 `disconnected, retrying in 1s…` loop.
 
+The DSM CSRF token can travel two ways, because a WebSocket cannot carry request
+headers and a `fetch()` cannot set `Sec-WebSocket-Protocol`:
+
+| Request | Token channel |
+| --- | --- |
+| WebSocket upgrade | `Sec-WebSocket-Protocol: synoterm.syno-token.<base64url>` |
+| `…/status` (`fetch`) | `X-Syno-Token: <raw>` (preflighted when cross-port) |
+
 Non-browser clients (curl) may call `…/status` without an `Origin` header; the
-WebSocket upgrade itself is strict.
+WebSocket upgrade itself is strict. Every refusal is also logged as one line
+(`refused <code> (<reason>) path=… peer=… origin=… cookie=yes|no token=yes|no`) —
+never the cookie or token values.
 
 ## 6. Framing rules
 

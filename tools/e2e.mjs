@@ -304,6 +304,17 @@ try {
   if (healthzBare.code !== 404) failures.push(`/healthz outside the prefix returned ${healthzBare.code} (expected 404)`);
   const statusPrefixed = await probe("/synoterm/status");
   if (statusPrefixed.code !== 200) failures.push(`/synoterm/status returned ${statusPrefixed.code}`);
+  // The status probe is what a cross-port browser fetch needs: an allowed
+  // origin asks, gets the preflight, and may then send X-Syno-Token.
+  const preflight = await fetch(`${pkgBase}/synoterm/status`, {
+    method: "OPTIONS",
+    headers: { Origin: pkgBase, "Access-Control-Request-Headers": "x-syno-token" },
+  });
+  if (preflight.status !== 204) failures.push(`CORS preflight returned ${preflight.status} (expected 204)`);
+  if (!/x-syno-token/i.test(preflight.headers.get("access-control-allow-headers") || "")) {
+    failures.push("CORS preflight does not allow X-Syno-Token");
+  }
+
   const pkgContext = await browser.newContext();
   const pkgPage = await pkgContext.newPage();
   pkgPage.on("pageerror", (error) => failures.push(`pageerror (prefixed): ${error}`));

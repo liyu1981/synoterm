@@ -246,6 +246,12 @@ fn handleConnection(ctx: *Ctx, fd: sys.fd_t) void {
     // /healthz echo the validated origin. WebSockets are not subject to CORS.
     const cors_headers = corsHeaders(allocator, request, false) catch "";
 
+    // A cross-port fetch that carries `X-Syno-Token` needs a preflight first.
+    if (std.mem.eql(u8, request.method, "OPTIONS")) {
+        handlePreflight(allocator, fd, request);
+        return;
+    }
+
     if (std.mem.eql(u8, rel_path, "/healthz")) {
         var body: [96]u8 = undefined;
         const json = std.fmt.bufPrint(&body, "{{\"ok\":true,\"version\":\"{s}\",\"api\":{d}}}\n", .{
@@ -293,6 +299,26 @@ fn corsHeaders(allocator: std.mem.Allocator, request: http.Request, credentials:
     return std.fmt.allocPrint(allocator, "Access-Control-Allow-Origin: {s}\r\nVary: Origin\r\n", .{origin});
 }
 
+/// Answers the CORS preflight that a cross-port `fetch()` with an
+/// `X-Syno-Token` header triggers. Only an origin that passes the same host
+/// check as the WebSocket upgrade gets an answer.
+fn handlePreflight(allocator: std.mem.Allocator, fd: sys.fd_t, request: http.Request) void {
+    const cors = corsHeaders(allocator, request, true) catch "";
+    if (cors.len == 0) {
+        http.sendError(allocator, fd, 403, "cross-origin request denied");
+        return;
+    }
+    var headers = util.List(u8).init(allocator);
+    defer headers.deinit();
+    headers.appendFmt(
+        "{s}Access-Control-Allow-Methods: GET, OPTIONS\r\n" ++
+            "Access-Control-Allow-Headers: X-Syno-Token\r\n" ++
+            "Access-Control-Max-Age: 600\r\n",
+        .{cors},
+    ) catch {};
+    http.send(allocator, fd, .{ .status = 204, .extra_headers = headers.items() }) catch {};
+}
+
 fn serveStatus(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: http.Request) void {
     const cors = corsHeaders(allocator, request, true) catch "";
     const access = checkAccess(ctx, allocator, fd, request, false) catch {
@@ -301,6 +327,7 @@ fn serveStatus(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: h
     };
     switch (access) {
         .denied => |denied| {
+            logDenial(request, fd, denied);
             var body = util.List(u8).init(allocator);
             defer body.deinit();
             body.appendFmt(
@@ -408,6 +435,40 @@ fn deny(code: u16, reason: []const u8) Access {
     return .{ .denied = .{ .code = code, .reason = reason } };
 }
 
+/// One line per refused request. A refused WebSocket handshake is invisible to
+/// JavaScript (the browser reports "connection failed" and nothing else), so
+/// the reason has to land in the service log. Presence flags only: the cookie
+/// and the token are never written.
+fn logDenial(request: http.Request, fd: sys.fd_t, denied: Denied) void {
+    var peer_buf: [16]u8 = undefined;
+    const peer = sys.peerIp(fd, &peer_buf) orelse "?";
+    const has_token = request.header("X-Syno-Token") != null or
+        request.header("Sec-WebSocket-Protocol") != null;
+    // The request line is attacker-controlled: keep control bytes out of the
+    // service log.
+    var path_buf: [160]u8 = undefined;
+    var origin_buf: [120]u8 = undefined;
+    std.debug.print(
+        "synoterm: refused {d} ({s}) path={s} peer={s} origin={s} cookie={s} token={s}\n",
+        .{
+            denied.code,
+            denied.reason,
+            printable(request.path, &path_buf),
+            peer,
+            printable(request.header("Origin") orelse "-", &origin_buf),
+            if (request.header("Cookie") != null) "yes" else "no",
+            if (has_token) "yes" else "no",
+        },
+    );
+}
+
+/// Copies at most `buf.len` bytes, replacing control characters.
+fn printable(text: []const u8, buf: []u8) []const u8 {
+    const n = @min(text.len, buf.len);
+    for (text[0..n], 0..) |c, i| buf[i] = if (c < 0x20 or c == 0x7f) '?' else c;
+    return buf[0..n];
+}
+
 /// Same-origin + DSM/dev authentication + account policy. Shared by the
 /// WebSocket upgrade and the `/status` probe so the UI can explain a refusal
 /// instead of retrying blindly (a failed WS handshake gives JS no details).
@@ -434,19 +495,8 @@ fn checkAccess(
         }
     }
 
-    // --- 2. subprotocols: DSM CSRF token and/or dev shared secret ---
-    var syno_token: []const u8 = "";
-    if (request.header("Sec-WebSocket-Protocol")) |protocols| {
-        var it = std.mem.splitScalar(u8, protocols, ',');
-        while (it.next()) |raw| {
-            const proto = std.mem.trim(u8, raw, " \t");
-            if (std.mem.startsWith(u8, proto, "synoterm.syno-token.")) {
-                if (decodeBase64Url(allocator, proto["synoterm.syno-token.".len..])) |decoded| {
-                    syno_token = decoded;
-                }
-            }
-        }
-    }
+    // --- 2. subprotocols/headers: DSM CSRF token and/or dev shared secret ---
+    const syno_token = synoTokenFromRequest(allocator, request);
 
     // --- 3. authenticate ---
     var identity = Identity{};
@@ -518,6 +568,7 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
     };
     var identity: Identity = switch (access) {
         .denied => |denied| {
+            logDenial(request, fd, denied);
             http.sendError(allocator, fd, denied.code, denied.reason);
             return;
         },
@@ -667,6 +718,32 @@ fn parseIpv4(text: []const u8) ?[4]u8 {
     }
     if (count != 4) return null;
     return octets;
+}
+
+/// The DSM CSRF token, in either of the two forms the UI can produce:
+///   - `synoterm.syno-token.<base64url>` in `Sec-WebSocket-Protocol` — the
+///     only channel available on a WebSocket upgrade (the browser cannot set
+///     request headers there);
+///   - `X-Syno-Token: <raw>` — used by the HTTP probes (`/status`), where a
+///     normal header is possible, so the probe can answer with the real reason
+///     instead of "token was not presented".
+fn synoTokenFromRequest(allocator: std.mem.Allocator, request: http.Request) []const u8 {
+    if (request.header("X-Syno-Token")) |raw| {
+        const token = std.mem.trim(u8, raw, " \t");
+        if (token.len > 0) return token;
+    }
+    if (request.header("Sec-WebSocket-Protocol")) |protocols| {
+        var it = std.mem.splitScalar(u8, protocols, ',');
+        while (it.next()) |raw| {
+            const proto = std.mem.trim(u8, raw, " \t");
+            if (std.mem.startsWith(u8, proto, "synoterm.syno-token.")) {
+                if (decodeBase64Url(allocator, proto["synoterm.syno-token.".len..])) |decoded| {
+                    return decoded;
+                }
+            }
+        }
+    }
+    return "";
 }
 
 /// Dev-mode shared secret: `?t=<token>` or `synoterm.dev-token.<base64url>`.
@@ -852,6 +929,22 @@ test "endpoints live under the configured prefix" {
     try std.testing.expectEqual(@as(?[]const u8, null), underBasePath("/healthz", "/synoterm"));
     try std.testing.expectEqual(@as(?[]const u8, null), underBasePath("/synotermfoo/ws", "/synoterm"));
     try std.testing.expectEqual(@as(?[]const u8, null), underBasePath("/", "/synoterm"));
+}
+
+test "syno token comes from a header or the upgrade subprotocol" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const header_only = try http.parse(a, "GET /synoterm/status HTTP/1.1\r\nHost: nas:7381\r\nX-Syno-Token: abc123\r\n\r\n");
+    try std.testing.expectEqualStrings("abc123", synoTokenFromRequest(a, header_only));
+
+    // base64url("tok") = "dG9r"
+    const upgrade = try http.parse(a, "GET /synoterm/ws HTTP/1.1\r\nHost: nas:7381\r\nSec-WebSocket-Protocol: synoterm.syno-token.dG9r\r\n\r\n");
+    try std.testing.expectEqualStrings("tok", synoTokenFromRequest(a, upgrade));
+
+    const none = try http.parse(a, "GET /synoterm/status HTTP/1.1\r\nHost: nas:7381\r\n\r\n");
+    try std.testing.expectEqualStrings("", synoTokenFromRequest(a, none));
 }
 
 test "request parsing" {

@@ -184,7 +184,17 @@ looks for the token, recording every source it tried in
 4. the package's own `ui/auth-probe.cgi` (diagnostic, see below),
 5. cookies visible to the page.
 
-To see what DSM offers on a given build, open:
+The token is presented to `/synoterm/status` as a plain `X-Syno-Token` header
+(the UI re-discovers it before every probe, and only drops the cache *after*
+reporting), so a refusal names the real reason instead of a canned "token was
+not presented". If the token cannot be found the backend answers
+`401 DSM rejected the session - the SynoToken was not presented`, and the UI says
+`no DSM token presented`.
+
+Every refusal is also written to `var/runtime/synoterm.log` as one line —
+code, reason, path, peer, origin, and whether a cookie/token was presented
+(never their values) — because a browser cannot show why a WebSocket handshake
+failed. To see what DSM offers on a given build, open:
 
 ```
 http://<nas>:5000/webman/3rdparty/synoterm/auth-probe.cgi

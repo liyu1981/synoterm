@@ -585,11 +585,21 @@ class Session {
    * A refused WebSocket handshake gives JavaScript no status code, so ask the
    * server why (same checks, plain HTTP). Turns "disconnected, retrying…"
    * loops into an actionable message.
+   *
+   * The token travels in `X-Syno-Token` here: a fetch cannot use the upgrade
+   * subprotocol, and without it DSM 7.1 rejects the probe with "the SynoToken
+   * was not presented" no matter what the WebSocket would have done — which
+   * made this message useless. The server logs the real reason as well.
    */
   async explainFailure() {
     const target = apiPath("status");
+    const token = await discoverSynoToken();
     try {
-      const response = await fetch(target, { credentials: "same-origin" });
+      const response = await fetch(target, {
+        credentials: "include",
+        cache: "no-store",
+        headers: token ? { "X-Syno-Token": token } : undefined,
+      });
       const text = await response.text();
       let info;
       try {
@@ -608,15 +618,14 @@ class Session {
       }
       if (!response.ok) {
         const reason = info?.reason || `HTTP ${response.status}`;
-        // A stale/missing CSRF token is the common cause of a 401 here; drop
-        // the cached token so the next reconnect re-discovers it instead of
-        // retrying with the same dead value.
-        if (response.status === 401 || /synotoken|token/i.test(reason)) {
-          clearTokenCache();
-        }
-        const tokenNote = tokenCache.value
+        const tokenNote = token
           ? ` (DSM token from ${tokenCache.source})`
-          : " (no DSM token found — open the terminal from the DSM desktop)";
+          : " (no DSM token presented — open the terminal from the DSM desktop)";
+        // A stale token is the common cause of a refusal: drop it *after*
+        // reporting, so the next reconnect re-discovers it instead of retrying
+        // with the same dead value. The note above must describe what was
+        // actually presented, not the post-clear state.
+        if (token && /synotoken|token/i.test(reason)) clearTokenCache();
         this.manager.setNotice(`${reason}${tokenNote}`, true);
         this.term.write(`\r\n\x1b[31m${reason}\x1b[0m\r\n\x1b[2m${tokenNote.trim()}\x1b[0m\r\n`);
         return;
