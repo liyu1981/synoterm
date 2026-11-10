@@ -112,6 +112,11 @@ sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh
 
 What that script does (`contrib/install-nginx-mount.sh`):
 
+0. reads the **effective** configuration (`nginx -T`, which follows includes) and
+   asks only the `server { }` blocks that listen on the DSM ports what they
+   include — parsing `nginx.conf` alone misses server blocks that live in
+   included files, and it cannot tell a server-level `include` from an
+   http-level one, which is how a snippet ends up "installed" but never loaded;
 1. writes the snippet to `/etc/nginx/conf.d/dsm.synoterm.conf` — DSM keeps the
    per-vhost `location` conf of its own apps there and every desktop
    `server { }` block loads `include conf.d/dsm.*.conf;`, so the `dsm.*.conf`
@@ -125,11 +130,14 @@ What that script does (`contrib/install-nginx-mount.sh`):
 2. runs `nginx -t` and **removes the files again if nginx rejects it** — a
    broken snippet can never take the DSM UI down;
 3. restarts nginx (`synosystemctl restart nginx`, with fallbacks);
-4. probes `http://127.0.0.1:7381/synoterm/healthz` and
-   `/synoterm/healthz` on **each `listen` port in nginx.conf** (http and https),
-   printing a line per vhost and exiting non-zero if a vhost that serves the DSM
-   desktop (`/webman/`) still answers 404. "Installed" and "works where the
-   browser is" are different things; the script checks the second one.
+4. probes `http://127.0.0.1:7381/synoterm/healthz` and `/synoterm/healthz` on
+   **each `listen` port** (http and https), printing a line per vhost and
+   exiting non-zero if a vhost that serves the DSM desktop (`/webman/`) still
+   answers 404 — listing, for that vhost, the include patterns its server block
+   *does* load. "Installed" and "works where the browser is" are different
+   things; the script checks the second one, and a copy that `nginx -t` rejects
+   (twice-included location, wrong context) is removed immediately with nginx's
+   own error.
 
 Undo: `sudo /var/packages/synoterm/target/contrib/uninstall-nginx-mount.sh`.
 

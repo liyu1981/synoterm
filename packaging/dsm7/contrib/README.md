@@ -21,11 +21,17 @@ apps and packages keep their per-vhost `location` conf there, and every
 one copy cover the `:5000` HTTP *and* the `:5001` HTTPS vhost, so this is a
 single root run with no `nginx.conf` edit.
 
-Other server-level include directories (`/usr/syno/share/nginx/conf.d`, …) are
-used too when nginx.conf loads the pattern from them; a copy that would
-duplicate the `location` in the same block is rejected by `nginx -t` and removed
-again. The script then reloads nginx and probes `/synoterm/healthz` on every
-`listen` port, naming any vhost that still answers 404.
+It decides from `nginx -T` (the effective configuration), not from
+`nginx.conf` alone: only `include` lines that the server blocks listening on the
+DSM ports really load are used, so a snippet in an http-level or Web Station
+directory is never mistaken for a working mount. A copy that `nginx -t` rejects
+(duplicate `location`, or a context where a `location` is invalid) is removed
+again and nginx's own error is printed.
+
+Finally it reloads nginx and probes `/synoterm/healthz` on every `listen` port.
+Any DSM vhost that still answers 404 is listed together with the include
+patterns *its* server block loads — that list is what to look at if a DSM build
+names things differently.
 
 Without this step the package still works — DSM serves the UI from
 `/webman/3rdparty/synoterm/web/` and the terminal talks to the NAS on port 7381
