@@ -31,7 +31,26 @@ case "${QUERY_STRING:-}" in
   *SynoToken=*) token_query="${QUERY_STRING##*SynoToken=}"; token_query="${token_query%%&*}" ;;
 esac
 
-# 2. run authenticate.cgi exactly the way the doc says a package CGI should
+# 2. run authenticate.cgi exactly the way the doc says a package CGI should.
+# `?token=<value>` lets the UI hand over the string it scraped from the desktop,
+# so this probe answers "is that string the session's SynoToken?" without
+# printing it (only its length is reported).
+token_param=""
+case "${QUERY_STRING:-}" in
+  token=*) token_param="${QUERY_STRING#token=}"; token_param="${token_param%%&*}" ;;
+  *"&token="*) token_param="${QUERY_STRING##*&token=}"; token_param="${token_param%%&*}" ;;
+esac
+
+used_token=""
+token_source="none"
+if [ -n "${token_param}" ]; then
+  used_token="${token_param}"; token_source="param"
+elif [ -n "${token_env}" ]; then
+  used_token="${token_env}"; token_source="env"
+elif [ -n "${token_query}" ]; then
+  used_token="${token_query}"; token_source="query"
+fi
+
 auth_user=""
 auth_exit=127
 auth_output=""
@@ -42,7 +61,7 @@ if [ -x "${AUTH_CGI}" ]; then
     SERVER_ADDR="${SERVER_ADDR:-}" \
     REQUEST_METHOD="${REQUEST_METHOD:-GET}" \
     QUERY_STRING="${QUERY_STRING:-}" \
-    HTTP_X_SYNO_TOKEN="${token_env}" \
+    HTTP_X_SYNO_TOKEN="${used_token}" \
     "${AUTH_CGI}" 2>/dev/null
   )
   auth_exit=$?
@@ -65,6 +84,9 @@ printf '"cookie_length":%s,' "${cookie_len:-0}"
 printf '"syno_token_env_present":%s,' "$(flag "${#token_env}")"
 printf '"syno_token_env_length":%s,' "${#token_env}"
 printf '"syno_token_query_present":%s,' "$(flag "${#token_query}")"
+printf '"syno_token_used_from":%s,' "$(json_str "${token_source}")"
+printf '"syno_token_used_length":%s,' "${#used_token}"
+printf '"syno_token_param_present":%s,' "$(flag "${#token_param}")"
 printf '"remote_addr":%s' "$(json_str "${REMOTE_ADDR:-}")"
 printf '},'
 printf '"identity":%s,' "$(json_str "$(id -un 2>/dev/null)")"

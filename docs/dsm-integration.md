@@ -195,10 +195,14 @@ looks for the token, recording every source it tried in
 4. the package's own `ui/auth-probe.cgi` (diagnostic, see below),
 5. cookies visible to the page.
 
-The token is presented to `/synoterm/status` as a plain `X-Syno-Token` header
-(the UI re-discovers it before every probe, and only drops the cache *after*
-reporting), so a refusal names the real reason instead of a canned "token was
-not presented". If the token cannot be found the backend answers
+Every candidate the UI found is presented — `X-Syno-Token: t1,t2,…` on the
+probe, one `synoterm.syno-token.<base64url>` subprotocol per candidate on the
+upgrade — and the server tries them in order until `authenticate.cgi` accepts
+one. That matters because a scrape can match the wrong `SynoToken=` in the
+desktop markup; the UI also asks `auth-probe.cgi?token=…` what DSM says about
+the first candidate and logs the answer (`exit N, user "…"`). The refusal now
+names the exit status and the sizes instead of a canned "token was not
+presented", and the cache is only dropped *after* reporting. If the token cannot be found the backend answers
 `401 DSM rejected the session - the SynoToken was not presented`, and the UI says
 `no DSM token presented`.
 

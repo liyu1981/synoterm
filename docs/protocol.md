@@ -136,8 +136,15 @@ headers and a `fetch()` cannot set `Sec-WebSocket-Protocol`:
 
 | Request | Token channel |
 | --- | --- |
-| WebSocket upgrade | `Sec-WebSocket-Protocol: synoterm.syno-token.<base64url>` |
-| `…/status` (`fetch`) | `X-Syno-Token: <raw>` (preflighted when cross-port) |
+| WebSocket upgrade | `Sec-WebSocket-Protocol: synoterm.syno-token.<base64url>` (repeatable + comma list) |
+| `…/status` (`fetch`) | `X-Syno-Token: <raw>[,<raw>…]` (preflighted when cross-port) |
+
+A DSM page does not tell JavaScript which string is the session's SynoToken —
+the desktop URL, a global, a cookie and the page HTML have all carried it — so
+the UI sends **every candidate it found (up to 8), best first**, and the server
+tries them in order: the first one `authenticate.cgi` accepts wins. The refusal
+message reports what happened instead of guessing:
+`DSM rejected the session (authenticate.cgi exit 7; 3 token(s), 13 B, cookie 1335 B)`.
 
 Non-browser clients (curl) may call `…/status` without an `Origin` header; the
 WebSocket upgrade itself is strict. Every refusal is also logged as one line

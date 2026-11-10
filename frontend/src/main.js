@@ -214,31 +214,41 @@ function apiPath(name) {
 }
 
 /**
- * DSM's CSRF token, if we can find it.
+ * DSM's CSRF token(s).
  *
- * Sources, in order of trustworthiness:
+ * `authenticate.cgi` needs the session cookie *and* the desktop's SynoToken,
+ * and DSM never tells a page which string is the real one: the desktop URL, a
+ * global, a cookie and the page HTML have all carried it across releases, and a
+ * scrape can just as well match an unrelated `SynoToken=` in the markup. So we
+ * collect every candidate we can find, in order of trustworthiness, and send
+ * them all — the server tries each until DSM accepts one.
+ *
  *   1. `?SynoToken=` on this page (the DSM 7.2 wrapper forwards it)
- *   2. the same-origin DSM desktop window (frame or popup): globals, the DOM
- *      bootstrap, or its cookies
- *   3. a same-origin fetch of /webman/index.cgi (the desktop HTML contains it)
- *   4. a `SynoToken` cookie, if this DSM build sets one
+ *   2. the same-origin DSM desktop window (frame or popup): its own URL,
+ *      globals, cookies, and the HTML it bootstrapped from
+ *   3. a same-origin fetch of /webman/index.cgi and /webman/desktop/index.html
+ *   4. the package's own `auth-probe.cgi`
+ *   5. cookies visible to this page
  *
- * The `.url` registration gives us no injected token, but the terminal page is
- * same-origin with the DSM desktop, so on DSM 7.1 the token is usually reachable
- * through 2 or 3.
+ * `window.synotermTokenSources` records where we looked, never the values.
  */
-let tokenCache = { value: "", source: "none" };
+const MAX_TOKEN_CANDIDATES = 8;
 
-function rememberToken(value, source, force = false) {
-  if (value && (force || !tokenCache.value)) {
-    tokenCache = { value, source };
-    console.info(`synoterm: DSM token from ${source} (${value.length} chars)`);
-  }
-  return tokenCache.value;
+let tokenCache = { values: [], source: "none" };
+
+function rememberTokens(candidates) {
+  const values = candidates.map((c) => c.value).slice(0, MAX_TOKEN_CANDIDATES);
+  if (values.length === 0) return "";
+  tokenCache = { values, source: candidates[0].source };
+  const extra = values.length > 1 ? `, +${values.length - 1} more candidate(s)` : "";
+  console.info(
+    `synoterm: DSM token from ${candidates[0].source} (${values[0].length} chars${extra})`,
+  );
+  return values[0];
 }
 
 function clearTokenCache() {
-  tokenCache = { value: "", source: "none" };
+  tokenCache = { values: [], source: "none" };
   console.info("synoterm: cleared cached DSM token");
 }
 
@@ -250,39 +260,60 @@ function noteSource(name, value) {
   return value || "";
 }
 
-function tokenFromText(text) {
-  // DSM has used several spellings, quoted and unquoted, and in URLs the token
-  // can arrive percent-encoded.
-  const patterns = [
-    /SynoToken["']?\s*[:=]\s*["']([^"'&<>\\]+)["']/,
-    /SynoToken["']?\s*[:=]\s*([^"'&<>;,\s\\]+)/,
-    /[?&](?:SynoToken|synotoken)=([^&"'<>\\]+)/,
-    /SynoToken%3D([^&"'<>\\]+)/i,
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) return decodeURIComponent(match[1]);
-  }
-  return "";
+function addCandidate(list, value, source) {
+  if (typeof value !== "string") return list;
+  const token = value.trim();
+  if (token.length === 0 || token.length > 256) return list;
+  if (list.length >= MAX_TOKEN_CANDIDATES) return list;
+  if (list.some((c) => c.value === token)) return list;
+  list.push({ value: token, source });
+  return list;
 }
 
-function tokenFromCookies(cookieText) {
+/** DSM has used several spellings, quoted and unquoted, and URLs encode it. */
+const TOKEN_PATTERNS = [
+  /SynoToken["']?\s*[:=]\s*["']([^"'&<>\\]+)["']/g,
+  /SynoToken["']?\s*[:=]\s*([^"'&<>;,\s\\]+)/g,
+  /[?&](?:SynoToken|synotoken)=([^&"'<>\\]+)/g,
+  /SynoToken%3D([^&"'<>\\]+)/gi,
+];
+
+function tokensFromText(text, source) {
+  const found = [];
+  for (const pattern of TOKEN_PATTERNS) {
+    for (const match of (text || "").matchAll(pattern)) {
+      let value = match[1];
+      try {
+        value = decodeURIComponent(value);
+      } catch {
+        /* keep the raw value */
+      }
+      addCandidate(found, value, source);
+    }
+  }
+  return found;
+}
+
+function tokensFromCookies(cookieText, source) {
+  const found = [];
   for (const part of (cookieText || "").split(";")) {
     const eq = part.indexOf("=");
     if (eq < 0) continue;
     const name = part.slice(0, eq).trim();
-    if (/synotoken/i.test(name)) return decodeURIComponent(part.slice(eq + 1).trim());
+    if (!/synotoken/i.test(name)) continue;
+    try {
+      addCandidate(found, decodeURIComponent(part.slice(eq + 1).trim()), source);
+    } catch {
+      addCandidate(found, part.slice(eq + 1).trim(), source);
+    }
   }
-  return "";
+  return found;
 }
 
-function tokenFromWindow(win) {
-  if (!win || win === window) return "";
+function tokensFromWindow(win, source) {
+  if (!win || win === window) return [];
   try {
-    // After login DSM redirects the desktop to …/index.cgi?SynoToken=…, so the
-    // parent frame's own URL is often the easiest source.
-    const fromUrl = tokenFromText(`${win.location.search || ""}${win.location.hash || ""}`);
-    if (fromUrl) return fromUrl;
+    const found = tokensFromText(`${win.location.search || ""}${win.location.hash || ""}`, source);
 
     // Globals DSM keeps in the desktop page (names have varied across releases).
     const globals = [win.SynoToken, win._SynoToken, win.synotoken, win.__SynoToken, win.SYNO_TOKEN];
@@ -302,37 +333,42 @@ function tokenFromWindow(win) {
     } catch {
       /* Ext not reachable */
     }
-    for (const candidate of globals) {
-      if (typeof candidate === "string" && candidate.length > 0) return candidate;
+    for (const candidate of globals) addCandidate(found, candidate, source);
+
+    for (const candidate of tokensFromCookies(win.document.cookie, source)) {
+      addCandidate(found, candidate.value, source);
     }
 
-    const fromCookie = tokenFromCookies(win.document.cookie);
-    if (fromCookie) return fromCookie;
-
     const html = win.document.documentElement ? win.document.documentElement.outerHTML : "";
-    return tokenFromText(html.slice(0, 4 * 1024 * 1024));
+    for (const candidate of tokensFromText(html.slice(0, 4 * 1024 * 1024), source)) {
+      addCandidate(found, candidate.value, source);
+    }
+    return found;
   } catch {
-    return "";
+    return [];
   }
 }
 
 async function discoverSynoToken(force = false) {
   if (force) clearTokenCache();
-  if (tokenCache.value) return tokenCache.value;
+  if (tokenCache.values.length > 0) return tokenCache.values[0];
   tokenSources = [];
   window.synotermTokenSources = tokenSources;
 
-  const fromOwnUrl = noteSource("page URL", tokenFromText(`${window.location.search}${window.location.hash}`));
-  if (fromOwnUrl) return rememberToken(fromOwnUrl, "page URL");
+  let found = tokensFromText(`${window.location.search}${window.location.hash}`, "page URL");
+  noteSource("page URL", found.length > 0 ? found[0].value : "");
+  if (found.length > 0) return rememberTokens(found);
 
   for (const [name, win] of [
     ["parent frame", window.parent],
     ["opener window", window.opener],
     ["top window", window.top],
   ]) {
-    const value = noteSource(name, tokenFromWindow(win));
-    if (value) return rememberToken(value, name);
+    const candidates = tokensFromWindow(win, name);
+    noteSource(name, candidates.length > 0 ? candidates[0].value : "");
+    for (const candidate of candidates) addCandidate(found, candidate.value, name);
   }
+  if (found.length > 0) return rememberTokens(found);
 
   // Only ask DSM's desktop page when we are inside DSM: on a dev server the
   // path does not exist and the 404 would show in the console.
@@ -345,8 +381,9 @@ async function discoverSynoToken(force = false) {
           noteSource(path, "");
           continue;
         }
-        const value = noteSource(path, tokenFromText(await response.text()));
-        if (value) return rememberToken(value, path);
+        const candidates = tokensFromText(await response.text(), path);
+        noteSource(path, candidates.length > 0 ? candidates[0].value : "");
+        for (const candidate of candidates) addCandidate(found, candidate.value, path);
       } catch {
         noteSource(path, "");
       }
@@ -360,7 +397,7 @@ async function discoverSynoToken(force = false) {
         const info = await response.json();
         window.synotermAuthProbe = info;
         const value = noteSource("auth-probe.cgi", typeof info.token === "string" ? info.token : "");
-        if (value) return rememberToken(value, "auth-probe.cgi");
+        addCandidate(found, value, "auth-probe.cgi");
       } else {
         noteSource("auth-probe.cgi", "");
       }
@@ -369,14 +406,40 @@ async function discoverSynoToken(force = false) {
     }
   }
 
-  const fromCookie = noteSource("cookie", tokenFromCookies(document.cookie));
-  if (fromCookie) return rememberToken(fromCookie, "cookie");
+  for (const candidate of tokensFromCookies(document.cookie, "cookie")) {
+    addCandidate(found, candidate.value, "cookie");
+  }
+  noteSource("cookie", found.length > 0 ? found[0].value : "");
+  if (found.length > 0) return rememberTokens(found);
 
   return "";
 }
 
-function synoToken() {
-  return tokenCache.value;
+/** All candidates, best first (the server tries them in this order). */
+function synoTokens() {
+  return tokenCache.values;
+}
+
+/**
+ * Ask the package's own CGI what DSM says about one token, i.e. whether the
+ * string we scraped is actually the session's CSRF token. Diagnostic only; the
+ * answer is put in the console so a support report can quote it.
+ */
+async function probeToken(token) {
+  if (!token) return;
+  try {
+    const response = await fetch(`auth-probe.cgi?token=${encodeURIComponent(token)}`, {
+      credentials: "same-origin",
+    });
+    if (!response.ok) return;
+    const info = await response.json();
+    console.info(
+      `synoterm: auth-probe with the scraped token -> exit ${info.authenticate_exit}, ` +
+        `user "${info.user || ""}"`,
+    );
+  } catch {
+    /* the CGI is optional */
+  }
 }
 
 function base64url(token) {
@@ -509,8 +572,10 @@ class Session {
     const protocols = [];
     const dev = devToken();
     if (dev) protocols.push(`synoterm.dev-token.${base64url(dev)}`);
-    const token = await discoverSynoToken();
-    if (token) protocols.push(synoTokenSubprotocol(token));
+    await discoverSynoToken();
+    // One subprotocol per candidate: RFC 6455 allows several, the server echoes
+    // the one it used, and it tries them in order until DSM accepts one.
+    for (const token of synoTokens()) protocols.push(synoTokenSubprotocol(token));
 
     this.setState("connecting");
     let socket;
@@ -593,12 +658,13 @@ class Session {
    */
   async explainFailure() {
     const target = apiPath("status");
-    const token = await discoverSynoToken();
+    await discoverSynoToken();
+    const tokens = synoTokens();
     try {
       const response = await fetch(target, {
         credentials: "include",
         cache: "no-store",
-        headers: token ? { "X-Syno-Token": token } : undefined,
+        headers: tokens.length > 0 ? { "X-Syno-Token": tokens.join(",") } : undefined,
       });
       const text = await response.text();
       let info;
@@ -618,14 +684,17 @@ class Session {
       }
       if (!response.ok) {
         const reason = info?.reason || `HTTP ${response.status}`;
-        const tokenNote = token
-          ? ` (DSM token from ${tokenCache.source})`
+        const tokenNote = tokens.length > 0
+          ? ` (DSM token from ${tokenCache.source}, ${tokens.length} candidate(s))`
           : " (no DSM token presented — open the terminal from the DSM desktop)";
-        // A stale token is the common cause of a refusal: drop it *after*
-        // reporting, so the next reconnect re-discovers it instead of retrying
-        // with the same dead value. The note above must describe what was
-        // actually presented, not the post-clear state.
-        if (token && /synotoken|token/i.test(reason)) clearTokenCache();
+        // A refused token is the common cause: ask the package's own CGI what
+        // DSM says about the string we scraped (console only), then drop the
+        // cache so the next reconnect re-discovers candidates. The note above
+        // must describe what was actually presented, not the post-clear state.
+        if (tokens.length > 0 && /synotoken|token/i.test(reason)) {
+          probeToken(tokens[0]);
+          clearTokenCache();
+        }
         this.manager.setNotice(`${reason}${tokenNote}`, true);
         this.term.write(`\r\n\x1b[31m${reason}\x1b[0m\r\n\x1b[2m${tokenNote.trim()}\x1b[0m\r\n`);
         return;

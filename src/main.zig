@@ -442,14 +442,13 @@ fn deny(code: u16, reason: []const u8) Access {
 fn logDenial(request: http.Request, fd: sys.fd_t, denied: Denied) void {
     var peer_buf: [16]u8 = undefined;
     const peer = sys.peerIp(fd, &peer_buf) orelse "?";
-    const has_token = request.header("X-Syno-Token") != null or
-        request.header("Sec-WebSocket-Protocol") != null;
+    const token_count = tokenCandidateCount(request);
     // The request line is attacker-controlled: keep control bytes out of the
     // service log.
     var path_buf: [160]u8 = undefined;
     var origin_buf: [120]u8 = undefined;
     std.debug.print(
-        "synoterm: refused {d} ({s}) path={s} peer={s} origin={s} cookie={s} token={s}\n",
+        "synoterm: refused {d} ({s}) path={s} peer={s} origin={s} cookie={s} tokens={d}\n",
         .{
             denied.code,
             denied.reason,
@@ -457,9 +456,28 @@ fn logDenial(request: http.Request, fd: sys.fd_t, denied: Denied) void {
             peer,
             printable(request.header("Origin") orelse "-", &origin_buf),
             if (request.header("Cookie") != null) "yes" else "no",
-            if (has_token) "yes" else "no",
+            token_count,
         },
     );
+}
+
+/// How many token candidates this request carries (0 = none presented).
+fn tokenCandidateCount(request: http.Request) usize {
+    var count: usize = 0;
+    if (request.header("X-Syno-Token")) |raw| {
+        var it = std.mem.splitScalar(u8, raw, ',');
+        while (it.next()) |part| {
+            if (std.mem.trim(u8, part, " \t").len > 0) count += 1;
+        }
+    }
+    if (request.header("Sec-WebSocket-Protocol")) |protocols| {
+        var it = std.mem.splitScalar(u8, protocols, ',');
+        while (it.next()) |raw| {
+            const proto = std.mem.trim(u8, raw, " \t");
+            if (std.mem.startsWith(u8, proto, "synoterm.syno-token.")) count += 1;
+        }
+    }
+    return count;
 }
 
 /// Copies at most `buf.len` bytes, replacing control characters.
@@ -496,7 +514,7 @@ fn checkAccess(
     }
 
     // --- 2. subprotocols/headers: DSM CSRF token and/or dev shared secret ---
-    const syno_token = synoTokenFromRequest(allocator, request);
+    const syno_tokens = synoTokenCandidates(allocator, request);
 
     // --- 3. authenticate ---
     var identity = Identity{};
@@ -514,29 +532,61 @@ fn checkAccess(
             const peer = sys.peerIp(fd, &peer_buf) orelse "127.0.0.1";
             const cookie = request.header("Cookie") orelse "";
             const no_env = [_][*:0]const u8{};
-            const env = auth.cgiEnv(allocator, cookie, syno_token, host, peer, &no_env) catch
-                return deny(500, "out of memory");
-            const capture = auth.runCapture(allocator, auth.authenticate_cgi, &no_env, env) catch
-                return deny(500, "DSM session lookup failed");
-            if (capture.status == 127) return deny(500, "authenticate.cgi is missing on this DSM build");
-            if (capture.status != 0) {
-                // DSM 7.1 needs cookie *and* SynoToken; a cookie alone makes
-                // authenticate.cgi exit non-zero with no output.
-                return deny(401, "DSM rejected the session - the SynoToken was not presented (DSM 7.1 needs both)");
+            const proto = request.header("X-Forwarded-Proto") orelse
+                (if (std.mem.endsWith(u8, host, ":443")) "https" else "http");
+
+            // Try every token the page offered; the first one DSM accepts wins.
+            // With no token at all, one attempt is made anyway, so a build that
+            // does not need one still works.
+            var last_status: u8 = 0;
+            var attempted: usize = 0;
+            var token_bytes: usize = 0;
+            const attempts: usize = if (syno_tokens.len == 0) 1 else syno_tokens.len;
+            var attempt: usize = 0;
+            while (attempt < attempts) : (attempt += 1) {
+                const token = if (syno_tokens.len == 0) "" else syno_tokens[attempt];
+                token_bytes = token.len;
+                const env = auth.cgiEnv(allocator, cookie, token, host, proto, request.path, peer, &no_env) catch
+                    return deny(500, "out of memory");
+                const capture = auth.runCapture(allocator, auth.authenticate_cgi, &no_env, env) catch
+                    return deny(500, "DSM session lookup failed");
+                attempted += 1;
+                if (capture.status == 127) return deny(500, "authenticate.cgi is missing on this DSM build");
+                if (capture.status != 0) {
+                    last_status = capture.status;
+                    continue;
+                }
+                const candidate = std.mem.trim(u8, capture.output, " \t\r\n");
+                if (candidate.len == 0) {
+                    last_status = 1;
+                    continue;
+                }
+                if (!validAccountName(candidate)) return deny(403, "invalid account name");
+                if (ctx.cfg.require_group.len > 0 and !accountInGroup(allocator, candidate, ctx.cfg.require_group)) {
+                    return deny(403, "this account is not allowed to open a terminal");
+                }
+                const pw = (sys.lookupPasswd(allocator, "/etc/passwd", candidate) catch null) orelse
+                    return deny(403, "account is not a local DSM user");
+                identity.user = allocator.dupeSentinel(u8, candidate, 0) catch return deny(500, "out of memory");
+                identity.uid = pw.uid;
+                identity.gid = pw.gid;
+                if (sys.homeDir(allocator, "/etc/passwd", candidate) catch null) |home| {
+                    if (home.len > 0) identity.home = allocator.dupeSentinel(u8, home, 0) catch "/";
+                }
+                break;
             }
-            const user = std.mem.trim(u8, capture.output, " \t\r\n");
-            if (user.len == 0) return deny(401, "no DSM session — open the terminal from the DSM desktop, or reload the page");
-            if (!validAccountName(user)) return deny(403, "invalid account name");
-            if (ctx.cfg.require_group.len > 0 and !accountInGroup(allocator, user, ctx.cfg.require_group)) {
-                return deny(403, "this account is not allowed to open a terminal");
-            }
-            const pw = (sys.lookupPasswd(allocator, "/etc/passwd", user) catch null) orelse
-                return deny(403, "account is not a local DSM user");
-            identity.user = allocator.dupeSentinel(u8, user, 0) catch return deny(500, "out of memory");
-            identity.uid = pw.uid;
-            identity.gid = pw.gid;
-            if (sys.homeDir(allocator, "/etc/passwd", user) catch null) |home| {
-                if (home.len > 0) identity.home = allocator.dupeSentinel(u8, home, 0) catch "/";
+            if (identity.user == null) {
+                if (attempted == 0) {
+                    return deny(401, "no DSM session — open the terminal from the DSM desktop, or reload the page");
+                }
+                // The exit status is what distinguishes "no token found" from
+                // "the token was rejected"; the sizes say which was sent.
+                const reason = std.fmt.allocPrint(
+                    allocator,
+                    "DSM rejected the session (authenticate.cgi exit {d}; {d} token(s), {d} B, cookie {d} B)",
+                    .{ last_status, attempted, token_bytes, cookie.len },
+                ) catch "DSM rejected the session (SynoToken not accepted)";
+                return deny(401, reason);
             }
         },
     }
@@ -720,30 +770,50 @@ fn parseIpv4(text: []const u8) ?[4]u8 {
     return octets;
 }
 
-/// The DSM CSRF token, in either of the two forms the UI can produce:
-///   - `synoterm.syno-token.<base64url>` in `Sec-WebSocket-Protocol` — the
-///     only channel available on a WebSocket upgrade (the browser cannot set
-///     request headers there);
-///   - `X-Syno-Token: <raw>` — used by the HTTP probes (`/status`), where a
-///     normal header is possible, so the probe can answer with the real reason
-///     instead of "token was not presented".
-fn synoTokenFromRequest(allocator: std.mem.Allocator, request: http.Request) []const u8 {
+/// Every DSM CSRF token the page managed to find, in the order it found them.
+///
+/// The UI cannot know which of its sources is the real one (the desktop URL,
+/// a global, a cookie, the page HTML), so it sends all of them and the first
+/// one `authenticate.cgi` accepts wins. Two channels, because a WebSocket
+/// cannot carry request headers and a `fetch()` cannot set
+/// `Sec-WebSocket-Protocol`:
+///   - `X-Syno-Token: t1,t2,…` — HTTP probes (`/status`);
+///   - repeated `synoterm.syno-token.<base64url>` entries in
+///     `Sec-WebSocket-Protocol` — the upgrade.
+fn synoTokenCandidates(allocator: std.mem.Allocator, request: http.Request) []const []const u8 {
+    const max_tokens = 8;
+    var list = util.List([]const u8).init(allocator);
+
     if (request.header("X-Syno-Token")) |raw| {
-        const token = std.mem.trim(u8, raw, " \t");
-        if (token.len > 0) return token;
+        var it = std.mem.splitScalar(u8, raw, ',');
+        while (it.next()) |part| {
+            if (list.items().len >= max_tokens) break;
+            const token = std.mem.trim(u8, part, " \t");
+            if (token.len == 0 or token.len > 256) continue;
+            if (containsToken(list.items(), token)) continue;
+            list.append(token) catch break;
+        }
     }
     if (request.header("Sec-WebSocket-Protocol")) |protocols| {
         var it = std.mem.splitScalar(u8, protocols, ',');
         while (it.next()) |raw| {
+            if (list.items().len >= max_tokens) break;
             const proto = std.mem.trim(u8, raw, " \t");
-            if (std.mem.startsWith(u8, proto, "synoterm.syno-token.")) {
-                if (decodeBase64Url(allocator, proto["synoterm.syno-token.".len..])) |decoded| {
-                    return decoded;
-                }
-            }
+            if (!std.mem.startsWith(u8, proto, "synoterm.syno-token.")) continue;
+            const decoded = decodeBase64Url(allocator, proto["synoterm.syno-token.".len..]) orelse continue;
+            if (decoded.len == 0 or decoded.len > 256) continue;
+            if (containsToken(list.items(), decoded)) continue;
+            list.append(decoded) catch break;
         }
     }
-    return "";
+    return list.toOwnedSlice() catch &[_][]const u8{};
+}
+
+fn containsToken(tokens: []const []const u8, needle: []const u8) bool {
+    for (tokens) |t| {
+        if (std.mem.eql(u8, t, needle)) return true;
+    }
+    return false;
 }
 
 /// Dev-mode shared secret: `?t=<token>` or `synoterm.dev-token.<base64url>`.
@@ -931,20 +1001,32 @@ test "endpoints live under the configured prefix" {
     try std.testing.expectEqual(@as(?[]const u8, null), underBasePath("/", "/synoterm"));
 }
 
-test "syno token comes from a header or the upgrade subprotocol" {
+test "syno token candidates come from the header or the upgrade subprotocol" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
     const header_only = try http.parse(a, "GET /synoterm/status HTTP/1.1\r\nHost: nas:7381\r\nX-Syno-Token: abc123\r\n\r\n");
-    try std.testing.expectEqualStrings("abc123", synoTokenFromRequest(a, header_only));
+    const one = synoTokenCandidates(a, header_only);
+    try std.testing.expectEqual(@as(usize, 1), one.len);
+    try std.testing.expectEqualStrings("abc123", one[0]);
 
-    // base64url("tok") = "dG9r"
-    const upgrade = try http.parse(a, "GET /synoterm/ws HTTP/1.1\r\nHost: nas:7381\r\nSec-WebSocket-Protocol: synoterm.syno-token.dG9r\r\n\r\n");
-    try std.testing.expectEqualStrings("tok", synoTokenFromRequest(a, upgrade));
+    // The UI sends every token it found; the server tries them in order.
+    const many = try http.parse(a, "GET /synoterm/status HTTP/1.1\r\nHost: nas:7381\r\nX-Syno-Token: aaa, bbb ,ccc\r\n\r\n");
+    const list = synoTokenCandidates(a, many);
+    try std.testing.expectEqual(@as(usize, 3), list.len);
+    try std.testing.expectEqualStrings("bbb", list[1]);
+
+    // base64url("tok") = "dG9r", base64url("other") = "b3RoZXI"
+    const upgrade = try http.parse(a, "GET /synoterm/ws HTTP/1.1\r\nHost: nas:7381\r\nSec-WebSocket-Protocol: synoterm.syno-token.dG9r, synoterm.syno-token.b3RoZXI\r\n\r\n");
+    const protos = synoTokenCandidates(a, upgrade);
+    try std.testing.expectEqual(@as(usize, 2), protos.len);
+    try std.testing.expectEqualStrings("tok", protos[0]);
+    try std.testing.expectEqualStrings("other", protos[1]);
 
     const none = try http.parse(a, "GET /synoterm/status HTTP/1.1\r\nHost: nas:7381\r\n\r\n");
-    try std.testing.expectEqualStrings("", synoTokenFromRequest(a, none));
+    try std.testing.expectEqual(@as(usize, 0), synoTokenCandidates(a, none).len);
+    try std.testing.expectEqual(@as(usize, 0), tokenCandidateCount(none));
 }
 
 test "request parsing" {

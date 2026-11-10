@@ -14,6 +14,8 @@ const sys = @import("sys.zig");
 const util = @import("util.zig");
 
 pub const authenticate_cgi = "/usr/syno/synoman/webman/modules/authenticate.cgi";
+/// What `SCRIPT_NAME` looks like to webman; only informational for the CGI.
+const auth_cgi_script = "/webman/modules/authenticate.cgi";
 pub const id_bin = "/usr/bin/id";
 
 pub const Identity = struct {
@@ -94,21 +96,38 @@ pub fn runCapture(
 }
 
 /// Builds the CGI environment for `authenticate.cgi` from the browser request.
+/// It mirrors what webman hands a package CGI (scheme, server name/port,
+/// request URI), because that CGI validates a DSM session and can be stricter
+/// than the cookie itself.
 pub fn cgiEnv(
     allocator: std.mem.Allocator,
     cookie: []const u8,
     syno_token: []const u8,
     host: []const u8,
+    proto: []const u8,
+    path: []const u8,
     peer_ip: []const u8,
     base_env: []const [*:0]const u8,
 ) ![]const [:0]const u8 {
     var list = util.List([:0]const u8).init(allocator);
     errdefer list.deinit();
 
+    // "nas:5001" -> SERVER_NAME "nas", SERVER_PORT "5001".
+    const colon = std.mem.lastIndexOfScalar(u8, host, ':');
+    const server_name = if (colon) |i| host[0..i] else host;
+    const server_port = if (colon) |i| host[i + 1 ..] else if (std.mem.eql(u8, proto, "https")) "443" else "80";
+    const https = std.mem.eql(u8, proto, "https");
+
     try list.append(try util.allocPrintZ(allocator, "REQUEST_METHOD=GET", .{}));
+    try list.append(try util.allocPrintZ(allocator, "REQUEST_URI={s}", .{path}));
+    try list.append(try util.allocPrintZ(allocator, "SCRIPT_NAME={s}", .{auth_cgi_script}));
     try list.append(try util.allocPrintZ(allocator, "QUERY_STRING=", .{}));
     try list.append(try util.allocPrintZ(allocator, "GATEWAY_INTERFACE=CGI/1.1", .{}));
-    try list.append(try util.allocPrintZ(allocator, "SERVER_SOFTWARE=synoterm", .{}));
+    try list.append(try util.allocPrintZ(allocator, "SERVER_SOFTWARE=nginx", .{}));
+    try list.append(try util.allocPrintZ(allocator, "SERVER_PROTOCOL=HTTP/1.1", .{}));
+    try list.append(try util.allocPrintZ(allocator, "SERVER_NAME={s}", .{server_name}));
+    try list.append(try util.allocPrintZ(allocator, "SERVER_PORT={s}", .{server_port}));
+    try list.append(try util.allocPrintZ(allocator, "HTTPS={s}", .{if (https) "on" else "off"}));
     try list.append(try util.allocPrintZ(allocator, "PATH=/usr/syno/bin:/usr/bin:/bin", .{}));
     try list.append(try util.allocPrintZ(allocator, "HTTP_COOKIE={s}", .{cookie}));
     try list.append(try util.allocPrintZ(allocator, "HTTP_HOST={s}", .{host}));
