@@ -17,7 +17,7 @@ const max_static_bytes: usize = 32 * 1024 * 1024;
 
 /// Bumped whenever the HTTP/WS surface changes, so an old binary that is still
 /// running can be recognised (the UI reports it when /status is missing).
-const server_version = "0.2.0";
+const server_version = "0.2.1";
 const api_version: u32 = 5;
 
 pub const AuthMode = enum { dev, dsm, ssh };
