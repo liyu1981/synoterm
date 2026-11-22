@@ -4,7 +4,7 @@
 #   tools/build-spk.sh [arch] [version]
 #
 # arch:    x86_64 | armv8 | armv7   (default: x86_64)
-# version: SPK version, "x.y.z-rev" (default: 0.1.2-0001)
+# version: SPK version, "x.y.z-rev" (default: <version in build.zig.zon>-0001)
 #
 # Env:
 #   SYNOTERM_OS_MIN_VER  override os_min_ver (default: 7.1-42661)
@@ -36,7 +36,14 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
 ARCH="${1:-x86_64}"
-SPK_VERSION="${2:-0.1.2-0001}"
+if [ -n "${2:-}" ]; then
+  SPK_VERSION="$2"
+else
+  # Never hardcode a version here: a stale default builds an SPK that DSM
+  # treats as a downgrade of whatever is already installed.
+  feature="$(sed -n 's/.*\.version = "\([0-9][0-9.]*\)".*/\1/p' "${ROOT}/build.zig.zon" | head -1)"
+  SPK_VERSION="${feature:-0.0.0}-0001"
+fi
 SETUID_TOOL="${SYNOTERM_SETUID:-0}"
 
 case "${ARCH}" in

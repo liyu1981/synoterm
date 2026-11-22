@@ -2,7 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # `master` is the default branch; `main` is kept so a rename does not
+    # silently stop CI (it did: pushes to master ran no checks at all).
+    branches: [master, main]
   pull_request:
 
 env:

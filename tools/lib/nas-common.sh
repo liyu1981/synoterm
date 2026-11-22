@@ -415,15 +415,38 @@ nas_build_number() {
   echo "${n}"
 }
 
+# The repo's version (X.Y.Z): the newest tag, else src/main.zig. A harness build
+# must never be a *downgrade* of an installed release, or DSM refuses to install
+# it — which is why these numbers follow the repo instead of being hardcoded.
+synoterm_feature_version() {
+  local v
+  v="$(git -C "${ROOT}" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
+  case "${v}" in
+    ''|*[!0-9.]*) v="$(sed -n 's/.*server_version = "\([0-9][0-9.]*\)".*/\1/p' "${ROOT}/src/main.zig" 2>/dev/null | head -1)" ;;
+  esac
+  case "${v}" in
+    ''|*[!0-9.]*|*.*.*.*) v="0.0.0" ;;
+  esac
+  printf '%s\n' "${v}"
+}
+
+# SPK feature version for a UI flavour: the repo version, shifted by one for each
+# alternative flavour, so switching flavour is an upgrade (never a downgrade).
+nas_feature_version() { # nas_feature_version <ui-style>
+  local feature minor
+  feature="$(synoterm_feature_version)"
+  minor="${feature##*.}"
+  case "${1}" in
+    extjs) printf '%s\n' "${feature}" ;;
+    vue)   printf '%s.%s\n' "${feature%.*}" "$((minor + 1))" ;;
+    *)     printf '%s.%s\n' "${feature%.*}" "$((minor + 2))" ;;
+  esac
+}
+
 nas_build_spk() { # nas_build_spk <ui-style> ; sets SPK_VERSION, SPK_FILE
   local ui_style="$1" build_number
   build_number="$(nas_build_number)"
-  # Distinct feature numbers per flavour, so switching flavour is an upgrade.
-  case "${ui_style}" in
-    extjs) SPK_VERSION="0.1.2-${build_number}" ;;
-    vue)   SPK_VERSION="0.1.3-${build_number}" ;;
-    *)     SPK_VERSION="0.1.4-${build_number}" ;;
-  esac
+  SPK_VERSION="$(nas_feature_version "${ui_style}")-${build_number}"
   SPK_FILE="${ROOT}/build/synoterm-${SPK_VERSION}-${ARCH}.spk"
 
   note "building ${SPK_VERSION} for ${ARCH} (os_min_ver=${OS_MIN_VER}, ui=${ui_style})…"

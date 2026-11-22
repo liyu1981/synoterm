@@ -2,7 +2,7 @@
 # Structural checks for a built .spk. Catches the classic packaging mistakes:
 # wrong layout, missing setuid relpath, non-executable scripts, missing icons.
 #
-#   tools/verify-spk.sh build/synoterm-0.1.0-0001-x86_64.spk
+#   tools/verify-spk.sh build/synoterm-0.2.1-0001-x86_64.spk
 set -eu
 SPK="${1:?usage: verify-spk.sh <file.spk>}"
 WORK="$(mktemp -d)"

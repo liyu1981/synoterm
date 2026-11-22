@@ -310,8 +310,7 @@ BUILD_NUMBER="$(git -C "${ROOT}" rev-list --count HEAD 2>/dev/null || true)"
 case "${BUILD_NUMBER}" in
   ''|*[!0-9]*) BUILD_NUMBER="$(date +%y%m%d%H%M)" ;;
 esac
-SPK_VERSION="0.1.0-${BUILD_NUMBER}"
-[ "${UI_STYLE}" = "vue" ] && SPK_VERSION="0.1.1-${BUILD_NUMBER}"
+SPK_VERSION="$(nas_feature_version "${UI_STYLE}")-${BUILD_NUMBER}"
 
 # ------------------------------------------------------------- 4. smoke test --
 if [ "${SKIP_SMOKE}" -eq 1 ]; then
