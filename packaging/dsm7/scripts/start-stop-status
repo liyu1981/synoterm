@@ -1,9 +1,11 @@
 #!/bin/sh
 # DSM service controller for synoterm.
 #
-# The server binary is installed with the setuid "tool" privilege (see
-# conf/privilege) so that it can fork a shell as the authenticated DSM user
-# while the package itself keeps running as the unprivileged package user.
+# The service runs as the unprivileged package user. In the default AUTH="ssh"
+# mode that is all it needs: every terminal is `ssh -l <account> 127.0.0.1` and
+# DSM's own sshd asks for the password. AUTH="dsm" instead forks a shell as the
+# DSM user whose session cookie the browser presented, which needs the binary to
+# be a setuid "tool" (build with SYNOTERM_SETUID=1, see conf/privilege).
 set -eu
 
 PKG_NAME="synoterm"
@@ -14,13 +16,23 @@ VAR="${SYNOPKG_PKGVAR:-/var/packages/${PKG_NAME}/var}"
 CONF="${VAR}/etc/synoterm.conf"
 
 # Optional overrides (postinst writes a commented template):
-#   REQUIRE_GROUP=administrators   group a DSM account must belong to
+#   AUTH=ssh                       ssh | dsm (see the header above)
+#   REQUIRE_GROUP=administrators   dsm mode: group the account must be in
 #   MAX_SESSIONS=8                 concurrent terminal limit
 #   BIND=auto                      listen address: auto | 0.0.0.0 | 127.0.0.1
+#   BASE_PATH=/synoterm            path prefix every endpoint lives under
+#   SSH_HOST=127.0.0.1             ssh mode: login host (the NAS itself)
+#   SSH_PORT=22                    ssh mode: sshd port
+#   SSH_CONTROL_PERSIST=600        ssh mode: seconds one login is reused for new tabs
 #   EXTRA_ARGS=                    any other synoterm flag
+AUTH="ssh"
 REQUIRE_GROUP="administrators"
 MAX_SESSIONS="8"
 BIND="auto"
+BASE_PATH="/synoterm"
+SSH_HOST="127.0.0.1"
+SSH_PORT="22"
+SSH_CONTROL_PERSIST="600"
 EXTRA_ARGS=""
 if [ -r "${CONF}" ]; then
   # shellcheck disable=SC1090
@@ -60,6 +72,9 @@ resolve_bind() {
   case "${BIND}" in
     0.0.0.0|127.0.0.1) printf '%s\n' "${BIND}"; return 0 ;;
   esac
+  # ssh mode presents a login prompt: reach it through DSM's web server (the
+  # contrib snippet or a reverse-proxy rule) and never from the LAN.
+  if [ "${AUTH}" = "ssh" ]; then printf '127.0.0.1\n'; return 0; fi
   # The helper names its file after the include pattern DSM uses there
   # (dsm.*.conf -> dsm.synoterm.conf), so match the name, not one fixed path.
   for candidate in /etc/nginx/conf.d/*synoterm*.conf \
@@ -76,20 +91,30 @@ case "${1:-}" in
     if is_running; then
       exit 0
     fi
-    mkdir -p "${RUNTIME}" "${VAR}/home"
+    mkdir -p "${RUNTIME}" "${VAR}/home" "${VAR}/home/.ssh"
+    chmod 700 "${VAR}/home/.ssh" 2>/dev/null || true
     rm -f "${PID_FILE}"
     # The web assets in ${DEST}/ui/web are also served statically by DSM; the
     # binary serves them itself so that the app still works if the nginx
     # snippet is missing (for example right after an upgrade).
-    HOME="${VAR}/home" nohup "${BIN}" \
-      --listen "${PORT}" \
+    set -- --listen "${PORT}" \
       --bind "$(resolve_bind)" \
-      --auth dsm \
-      --base-path /synoterm \
+      --auth "${AUTH}" \
+      --base-path "${BASE_PATH}" \
       --web-root "${DEST}/ui/web" \
-      --require-group "${REQUIRE_GROUP}" \
-      --max-sessions "${MAX_SESSIONS}" \
-      ${EXTRA_ARGS} \
+      --max-sessions "${MAX_SESSIONS}"
+    if [ "${AUTH}" = "dsm" ]; then
+      set -- "$@" --require-group "${REQUIRE_GROUP}"
+    fi
+    if [ "${AUTH}" = "ssh" ]; then
+      # ssh keeps known_hosts and its ControlMaster socket in HOME; one login
+      # is reused for SSH_CONTROL_PERSIST seconds so a new tab does not prompt.
+      set -- "$@" \
+        --ssh-host "${SSH_HOST}" \
+        --ssh-port "${SSH_PORT}" \
+        --ssh-control-persist "${SSH_CONTROL_PERSIST}"
+    fi
+    HOME="${VAR}/home" nohup "${BIN}" "$@" ${EXTRA_ARGS} \
       >>"${LOG_FILE}" 2>&1 &
     pid=$!
     echo "${pid}" >"${PID_FILE}"

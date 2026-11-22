@@ -1,4 +1,4 @@
-# contrib — the one manual step
+# contrib — the optional nginx mount
 
 DSM 7 refuses to let an unsigned package use its package framework's internal
 workers, and the same-origin nginx mount (`/synoterm/`) is one of them:
@@ -7,7 +7,13 @@ workers, and the same-origin nginx mount (`/synoterm/`) is one of them:
 error 320: non-synology-signed package should not use internal worker
 ```
 
-So the mount is applied **by you, once, as root**, instead of by the package:
+The supported alternative needs no root shell at all: *Control Panel → Login
+Portal → Advanced → Reverse Proxy* on a port of its own (e.g. `https:7171` →
+`http:127.0.0.1:7381`). See `docs/dsm-integration.md` §4.3. Use this script when
+you want the terminal on DSM's existing `:5001` vhost instead of a new port.
+
+Where you do need it, the mount is applied **by you, once, as root**, instead of
+by the package:
 
 ```sh
 # on the NAS (root shell or sudo)

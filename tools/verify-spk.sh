@@ -92,10 +92,19 @@ done
 
 [ -x "${WORK}/payload/ui/auth-probe.cgi" ] || { echo "  FAIL ui/auth-probe.cgi must be executable"; fail=1; }
 
-# The setuid tool must be declared with the same path the payload ships.
-if ! grep -q '"relpath": "bin/synoterm"' "${WORK}/conf/privilege"; then
-  echo "  MISS conf/privilege tool relpath"
-  fail=1
+# The setuid tool is only needed for DSM-session auth (SYNOTERM_SETUID=1). The
+# default build ships no privileged artifact: ssh mode authenticates through
+# sshd and always runs as the package user.
+if [ "${SYNOTERM_SETUID:-0}" = "1" ]; then
+  if ! grep -q '"relpath": "bin/synoterm"' "${WORK}/conf/privilege"; then
+    echo "  MISS conf/privilege tool relpath (SYNOTERM_SETUID=1)"; fail=1
+  else
+    echo "  ok   conf/privilege declares the setuid tool"
+  fi
+elif grep -q '"relpath": "bin/synoterm"' "${WORK}/conf/privilege"; then
+  echo "  FAIL conf/privilege declares a setuid tool in an ssh build (SYNOTERM_SETUID=0)"; fail=1
+else
+  echo "  ok   no setuid tool (ssh auth)"
 fi
 
 for script in "${WORK}"/scripts/*; do

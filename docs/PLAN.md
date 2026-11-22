@@ -194,7 +194,7 @@ Details and file contents: [dsm-integration.md](dsm-integration.md).
 | # | Decision | Rationale | Reversal cost |
 | --- | --- | --- | --- |
 | D1 | Zig over Go/Node | single static binary per arch, no runtime, cross-compiles with `zig build -Dtarget=…`, direct PTY control | high |
-| D2 | No SSH in the default path | no second credential, no SSH service dependency, 2FA/LDAP friendly, real `login`-equivalent semantics | low (M6 keeps SSH as a provider) |
+| D2 | ~~No SSH in the default path~~ — reversed: ssh is now the default auth | no DSM token scraping, no setuid binary; costs an enabled SSH service and a prompt per browser session | — (see docs/history.md) |
 | D3 | Setuid `tool` for one binary | only way to fork a PTY as another user while the package itself is unprivileged; DSM-sanctioned mechanism | medium |
 | D4 | xterm.js, not a server-rendered terminal | best emulation/UX, tiny integration surface, offline bundle | low |
 | D5 | iframe isolation for the UI | DSM's Vue/ExtJS globals, CSS resets and upgrade leftovers cannot break xterm; wrapper stays ~60 lines of ES5 | low |

@@ -2,18 +2,20 @@
 
 # synoterm
 
-A terminal that opens **inside the Synology DSM desktop** as a real desktop
-window: **xterm.js** renders it, a small **Zig** binary owns the PTY, and it
-ships as a native `.spk` with no runtime dependencies on the NAS.
+A terminal for Synology DSM: **xterm.js** renders it in the browser, a small
+**Zig** binary owns the PTY, and it ships as a native `.spk` with no runtime
+dependencies on the NAS. It runs either as its own page behind DSM's reverse
+proxy or as a window inside the DSM desktop.
 
 ![synoterm demo](https://raw.githubusercontent.com/liyu1981/synoterm/master/assets/synoterm-demo.png)
 
 ## Features
 
-- Real PTY with `/bin/bash` (or the logged-in user's shell)
-- Multiple terminal windows, resize, scrollback
+- Real terminal on a PTY, multiple tabs/windows, resize, scrollback
 - xterm.js rendering with font/size/line-height settings
-- Runs as the logged-in DSM user (DSM account integration)
+- Logs in as your own DSM account over SSH: DSM's sshd owns the password, the
+  2FA prompt and the account policy, and the prompt is the terminal itself
+- Optional DSM-session mode (cookie + SynoToken) for a password-free start
 - Static musl binary: x86_64, aarch64, armv7
 - No runtime dependencies on the NAS
 
@@ -23,10 +25,10 @@ ships as a native `.spk` with no runtime dependencies on the NAS.
 window is registered as an ExtJS app. DSM 7.2's Vue window is a build flag
 (`SYNOTERM_UI_STYLE=vue`), not the target.
 
-In scope: terminal (real PTY, resize, multiple windows, scrollback, font settings);
-x86_64/aarch64/armv7 static musl binaries; DSM account integration (shell runs as
-the logged-in DSM user, admins only, local accounts only); no SSH/Python/Node on
-the NAS; unsigned packages (two-step install).
+In scope: terminal (real PTY, resize, tabs, scrollback, font settings);
+x86_64/aarch64/armv7 static musl binaries; account integration (SSH login as your
+DSM account, or the DSM session itself); DSM's reverse proxy or its existing
+nginx vhost; no Python/Node on the NAS; unsigned packages.
 
 Out of scope for 1.x: sessions surviving window close; file manager/SFTP; DSM 6.x
 and 7.2+ as primary target; signed packages.
@@ -39,34 +41,56 @@ and 7.2+ as primary target; signed packages.
    (`error 320, non-synology-signed package should not use internal worker`), so
    the install must go through Package Center's UI.
 
-2. **One-time, as root — mount the terminal on DSM's web server:**
+2. **Enable SSH** (*Control Panel → Terminal & SNMP → Enable SSH service*). The
+   terminal logs in through DSM's own sshd, so the password, 2FA code and account
+   policy are DSM's — synoterm never sees a DSM cookie or token.
 
-   ```sh
-   sudo /var/packages/synoterm/target/contrib/install-nginx-mount.sh
-   ```
+3. **Expose the backend through DSM's reverse proxy** (no root shell needed):
 
-   **Why this step exists:** the clean way to reach a WebSocket is DSM's own nginx
-   (`https://nas:5001/synoterm/…`), and DSM exposes that as a *package resource*
-   handled by one of its **internal workers**. DSM 7 only lets
-   Synology-signed packages use internal workers — a self-built package is
-   rejected before it is installed. So the package ships the same nginx snippet
-   as a file and this helper applies it from your root shell instead: it finds a
-   directory nginx already includes inside a `server {}` block, runs `nginx -t`,
-   **removes the file again if nginx would reject it**, then restarts nginx.
+   *Control Panel → Login Portal → Advanced → Reverse Proxy → Create*
 
-   *Optional.* Skip it and the app still works: DSM serves the UI from
-   `ui/web`, and the terminal listens on port 7381 of the NAS (allow TCP 7381 in
-   *Control Panel → Security → Firewall*). The UI detects which mode is available
-   (`window.synotermBackend` in the console shows `proxy` or `direct`).
+   | field | value |
+   | --- | --- |
+   | Source protocol / hostname / port | `HTTPS` / `nas` / `7171` (any free port) |
+   | Destination protocol / hostname / port | `HTTP` / `localhost` / `7381` |
+   | Path | `/` |
 
-3. **DSM → main menu → Terminal.** The shell runs as your DSM account; check with
-   `id`, `pwd`, `stty size`.
+   DSM keeps that rule in its own configuration, so it survives DSM and package
+   upgrades (unlike a file dropped into `/etc/nginx/conf.d`). Leave the custom
+   headers alone: DSM already forwards `Upgrade`/`Connection` for WebSockets.
+
+   Then open `https://nas:7171/` and type your DSM account; the terminal asks for
+   the password. `BASE_PATH=""` in `/var/packages/synoterm/var/etc/synoterm.conf`
+   is what makes the app sit at the proxy root (`/synoterm` is the packaged
+   default; see `docs/dsm-integration.md` §4.3).
+
+   *Alternative, no extra port:* as root, `contrib/install-nginx-mount.sh` hooks
+   the same backend into DSM's existing `:5001` vhost at `/synoterm/`. Keep
+   `BASE_PATH="/synoterm"` for that, or mount it in the DSM desktop window from
+   step 4.
+
+4. **Optional: keep the DSM desktop entry.** *DSM → main menu → Terminal* opens
+   the same UI in a DSM window (an iframe around
+   `/webman/3rdparty/synoterm/web/`). It shares `/synoterm/` with the reverse
+   proxy, so keep `BASE_PATH="/synoterm"` if you use it.
+
+**Authentication modes** (`AUTH=` in
+`/var/packages/synoterm/var/etc/synoterm.conf`):
+
+| `AUTH` | how the user is identified | needs |
+| --- | --- | --- |
+| `ssh` (default) | `ssh -l <account> 127.0.0.1`: DSM's sshd shows the password/OTP prompt **in the terminal** | the SSH service enabled |
+| `dsm` | the browser's DSM session (cookie + SynoToken) is replayed to `authenticate.cgi`; the shell is forked as that account | a build with `SYNOTERM_SETUID=1` |
+
+`ssh` needs no setuid binary, no DSM token and no webman — which is why it is the
+default. An existing install keeps DSM mode only if its `synoterm.conf` still
+says `AUTH="dsm"`; the file is never rewritten on upgrade.
 
 Upgrading is step 1 again (install over the old version); `contrib/` changes too,
-so re-run step 2 only if the helper's output asks you to. Removing:
+so re-run step 3's helper only if you use it. Removing:
 
 ```sh
-sudo /var/packages/synoterm/target/contrib/uninstall-nginx-mount.sh   # before uninstalling
+sudo /var/packages/synoterm/target/contrib/uninstall-nginx-mount.sh   # if you used it
 ```
 
 Troubleshooting in one command:
@@ -78,15 +102,16 @@ sudo /var/packages/synoterm/target/contrib/diagnose.sh
 ## High-level overview
 
 ```
-DSM desktop (http://nas:5000)
-  Terminal window (iframe)  ⇄  /synoterm/ws  (nginx mount, or the package port)
-       xterm.js
-                              │ DSM cookie + SynoToken
+browser ⇄ https://nas:7171/  (DSM reverse proxy)
+          or https://nas:5001/synoterm/  (contrib nginx snippet)
+          or the DSM desktop window (iframe)
+       xterm.js  ⇄  /ws
                               ▼
   synoterm (Zig, static musl) on 127.0.0.1:7381
-                              │ authenticate.cgi → DSM user
-                              ▼
-  /dev/ptmx ── fork ── setuid(user) ── exec shell
+                              ▼  AUTH=ssh (default)
+  /dev/ptmx ── exec ssh -l <account> 127.0.0.1 ── DSM sshd ── your shell
+                              │ AUTH=dsm
+                    authenticate.cgi → fork as that user (setuid build)
 ```
 
 Target: DSM 7.0/7.1 (verified on DSM 7.1.1-42962 / DS218+). DSM 7.2 Vue window

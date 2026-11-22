@@ -299,3 +299,73 @@ body {
 .xterm .xterm-viewport {
   background: var(--bg) !important;
 }
+
+/* ssh mode: asked once, before the first terminal connects. The password is
+   typed into the terminal itself, so this form only carries the account name. */
+.login {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(9, 14, 19, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+.login[hidden] {
+  display: none;
+}
+
+.login-box {
+  width: min(340px, calc(100vw - 32px));
+  padding: 16px 18px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+
+.login-box h2 {
+  margin: 0 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.login-box label {
+  display: block;
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.login-box input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.login-box input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.login-box .hint {
+  margin: 8px 0 0;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.login-box .settings-actions button[type="submit"] {
+  background: rgba(126, 224, 255, 0.12);
+  border-color: var(--accent);
+  color: var(--accent);
+}

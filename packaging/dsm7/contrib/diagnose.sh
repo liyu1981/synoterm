@@ -22,22 +22,37 @@ say "package"
 run "ls -ld /var/packages/${PKG} 2>/dev/null || echo 'package directory missing'"
 run "synopkg status ${PKG} 2>&1 || /usr/syno/bin/synopkg status ${PKG} 2>&1"
 run "ls -l ${DEST}/bin/synoterm 2>&1"
-run "cat ${DEST}/INFO 2>/dev/null | head -5"
+run "cat /var/packages/${PKG}/INFO 2>/dev/null | head -5"
 
 say "service settings"
 run "cat ${VAR}/etc/synoterm.conf 2>/dev/null | grep -v '^#' | grep -v '^$'"
+
+say "auth mode (AUTH=ssh needs the SSH service; AUTH=dsm needs the setuid tool)"
+AUTH=$(grep -E '^AUTH=' "${VAR}/etc/synoterm.conf" 2>/dev/null | head -1 | tr -d '"' | cut -d= -f2)
+[ -n "${AUTH}" ] || AUTH=ssh   # start-stop-status default
+echo "  AUTH=${AUTH}"
+if [ "${AUTH}" = "ssh" ]; then
+  run "command -v ssh && ssh -V 2>&1"
+  run "netstat -ltn 2>/dev/null | grep '[:.]22 ' || ss -ltn 2>/dev/null | grep '[:.]22 ' || echo 'nothing listening on 22 (SSH service off?)'"
+  run "ls -ld ${VAR}/home/.ssh; ls -l ${VAR}/home/.ssh 2>/dev/null"
+else
+  run "ls -l ${DEST}/bin/synoterm"
+fi
 
 say "listener"
 run "netstat -ltnp 2>/dev/null | grep -w ${PORT} || echo 'nothing listening on ${PORT}'"
 run "ss -ltnp 2>/dev/null | grep -w ${PORT} || true"
 
 say "backend probe"
-# Every endpoint lives under /${PKG}/ — behind the nginx mount and on the
-# package's own port alike.
-run "curl -sS --max-time 3 http://127.0.0.1:${PORT}/${PKG}/healthz || echo '127.0.0.1:${PORT}/${PKG}/healthz unreachable'"
+# Every endpoint lives under BASE_PATH (default /synoterm; "" = proxy root) —
+# behind the mount and on the package's own port alike.
+BASE=$(grep -E '^BASE_PATH=' "${VAR}/etc/synoterm.conf" 2>/dev/null | head -1 | tr -d '"' | cut -d= -f2)
+[ -n "${BASE}" ] || BASE=/synoterm
+echo "  BASE_PATH=${BASE}"
+run "curl -sS --max-time 3 http://127.0.0.1:${PORT}${BASE}/healthz || echo '127.0.0.1:${PORT}${BASE}/healthz unreachable'"
 LANIP=$(ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1{split($4,a,"/"); print a[1]}')
 if [ -n "${LANIP}" ]; then
-  run "curl -sS --max-time 3 http://${LANIP}:${PORT}/${PKG}/healthz || echo '${LANIP}:${PORT}/${PKG}/healthz unreachable (firewall?)'"
+  run "curl -sS --max-time 3 http://${LANIP}:${PORT}${BASE}/healthz || echo '${LANIP}:${PORT}${BASE}/healthz unreachable (firewall?)'"
 fi
 
 say "nginx mount"
@@ -75,7 +90,7 @@ printf '%s\n' "${DSM_LISTENS}" | while read -r port scheme; do
   fi
 done
 if [ -n "${LANIP}" ]; then
-  run "curl -s -o /dev/null -w 'mount http://${LANIP}:5000/${PKG}/healthz -> %{http_code}\n' --max-time 3 http://${LANIP}:5000/${PKG}/healthz"
+  run "curl -s -o /dev/null -w 'mount http://${LANIP}:5000${BASE}/healthz -> %{http_code}\n' --max-time 3 http://${LANIP}:5000${BASE}/healthz"
 fi
 
 say "UI files"

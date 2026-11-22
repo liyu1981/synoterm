@@ -17,6 +17,10 @@
 #         "non-synology-signed package should not use internal worker".
 #     0 — no privileged resource at all: DSM serves the UI from ui/web and the
 #         terminal talks to the package's own port (see docs/dsm-integration.md).
+#   SYNOTERM_SETUID  0 | 1  (default: 0)
+#     1 — install bin/synoterm setuid root (the "tool" privilege) so the backend
+#         can fork a login shell as the authenticated DSM user. Required only for
+#         AUTH="dsm"; ssh mode logs in through sshd and needs no privilege.
 #   SYNOTERM_UI_STYLE  extjs | vue | url   (default: extjs)
 #     extjs — DSM 7.0/7.1 desktop window (`type: "app"` + appWindow class built
 #             with Ext.extend(SYNO.SDS.AppWindow, …)). A real DSM window, not a
@@ -33,6 +37,7 @@ ROOT="$(pwd)"
 
 ARCH="${1:-x86_64}"
 SPK_VERSION="${2:-0.1.2-0001}"
+SETUID_TOOL="${SYNOTERM_SETUID:-0}"
 
 case "${ARCH}" in
   x86_64) ZIG_TARGET="x86_64-linux-musl" ;;
@@ -119,6 +124,9 @@ cp "${STAGING}/icons/icon_256.png" "${STAGING}/PACKAGE_ICON_256.PNG"
 rm -rf "${STAGING}/icons"
 
 cp -R "${ROOT}/packaging/dsm7/conf" "${STAGING}/conf"
+if [ "${SETUID_TOOL}" = "1" ]; then
+  cp "${ROOT}/packaging/dsm7/privilege.setuid" "${STAGING}/conf/privilege"
+fi
 if [ "${NGINX_MOUNT}" = "0" ]; then
   # No privileged resource: nothing for DSM's internal workers to do.
   rm -f "${STAGING}/conf/resource"

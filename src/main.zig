@@ -17,10 +17,10 @@ const max_static_bytes: usize = 32 * 1024 * 1024;
 
 /// Bumped whenever the HTTP/WS surface changes, so an old binary that is still
 /// running can be recognised (the UI reports it when /status is missing).
-const server_version = "0.1.4";
-const api_version: u32 = 4;
+const server_version = "0.2.0";
+const api_version: u32 = 5;
 
-pub const AuthMode = enum { dev, dsm };
+pub const AuthMode = enum { dev, dsm, ssh };
 
 pub const Config = struct {
     bind_port: u16 = 8080,
@@ -34,6 +34,18 @@ pub const Config = struct {
     /// Group required in DSM mode. DSM administrators are members of
     /// "administrators"; set to "" to allow any authenticated account.
     require_group: []const u8 = "administrators",
+    /// ssh mode: the terminal is `ssh -l <user> <ssh_host>` and DSM's own sshd
+    /// does the authentication. No DSM cookie, SynoToken or CGI is involved,
+    /// so the UI needs neither the DSM desktop nor webman.
+    ssh_bin: [:0]const u8 = "/bin/ssh",
+    ssh_host: []const u8 = "127.0.0.1",
+    ssh_port: u16 = 22,
+    /// Seconds an authenticated ssh master connection is kept open so a second
+    /// tab does not ask for the password again (0 disables connection sharing).
+    ssh_control_persist: u32 = 600,
+    /// HOME of the service: `ssh` keeps known_hosts and its control socket
+    /// there. The package sets it to $SYNOPKG_PKGVAR/home.
+    home: [:0]const u8 = "/",
     default_shell: [:0]const u8 = "/bin/sh",
     term: [:0]const u8 = "xterm-256color",
     max_sessions: u32 = 8,
@@ -53,6 +65,17 @@ pub const Ctx = struct {
 const Link = struct {
     fd: sys.fd_t,
     mutex: util.Mutex = .{},
+    /// Set once a close frame has gone out, so the pty pump and the input
+    /// bridge cannot both send one — a second close makes browsers report an
+    /// abnormal closure ("Close received after close").
+    closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn sendClose(self: *Link) void {
+        if (self.closing.swap(true, .monotonic)) return;
+        self.mutex.lock();
+        ws.writeFrame(self.fd, .close, &.{}) catch {};
+        self.mutex.unlock();
+    }
 
     fn sendBinary(self: *Link, bytes: []const u8) void {
         self.mutex.lock();
@@ -82,6 +105,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const argv = init.args.toSlice(allocator) catch return error.InvalidArguments;
 
     var cfg = Config{};
+    var home_from_cli = false;
+    var ssh_bin_set = false;
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
@@ -102,7 +127,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 cfg.auth_mode = .dev;
             } else if (std.mem.eql(u8, value, "dsm")) {
                 cfg.auth_mode = .dsm;
+            } else if (std.mem.eql(u8, value, "ssh")) {
+                cfg.auth_mode = .ssh;
             } else return usage();
+        } else if (std.mem.eql(u8, arg, "--ssh-bin")) {
+            cfg.ssh_bin = try allocator.dupeSentinel(u8, try nextArg(argv, &i), 0);
+            ssh_bin_set = true;
+        } else if (std.mem.eql(u8, arg, "--ssh-host")) {
+            cfg.ssh_host = try nextArg(argv, &i);
+        } else if (std.mem.eql(u8, arg, "--ssh-port")) {
+            cfg.ssh_port = std.fmt.parseUnsigned(u16, try nextArg(argv, &i), 10) catch return usage();
+        } else if (std.mem.eql(u8, arg, "--ssh-control-persist")) {
+            cfg.ssh_control_persist = std.fmt.parseUnsigned(u32, try nextArg(argv, &i), 10) catch return usage();
+        } else if (std.mem.eql(u8, arg, "--home")) {
+            cfg.home = try allocator.dupeSentinel(u8, try nextArg(argv, &i), 0);
+            home_from_cli = true;
         } else if (std.mem.eql(u8, arg, "--require-group")) {
             cfg.require_group = try nextArg(argv, &i);
         } else if (std.mem.eql(u8, arg, "--shell")) {
@@ -133,6 +172,27 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const env_auth = envOr("SYNOTERM_AUTH", "");
     if (std.mem.eql(u8, env_auth, "dsm")) cfg.auth_mode = .dsm;
     if (std.mem.eql(u8, env_auth, "dev")) cfg.auth_mode = .dev;
+    if (std.mem.eql(u8, env_auth, "ssh")) cfg.auth_mode = .ssh;
+    const env_ssh_bin = envOr("SYNOTERM_SSH_BIN", "");
+    if (env_ssh_bin.len > 0) {
+        cfg.ssh_bin = allocator.dupeSentinel(u8, env_ssh_bin, 0) catch cfg.ssh_bin;
+        ssh_bin_set = true;
+    }
+    const env_ssh_host = envOr("SYNOTERM_SSH_HOST", "");
+    if (env_ssh_host.len > 0) cfg.ssh_host = env_ssh_host;
+    const env_ssh_port = envOr("SYNOTERM_SSH_PORT", "");
+    if (env_ssh_port.len > 0) cfg.ssh_port = std.fmt.parseUnsigned(u16, env_ssh_port, 10) catch cfg.ssh_port;
+    // The package start script sets HOME to the writable package var; ssh keeps
+    // known_hosts and the ControlMaster socket there.
+    const env_home = envOr("HOME", "");
+    if (env_home.len > 0 and !home_from_cli) cfg.home = allocator.dupeSentinel(u8, env_home, 0) catch cfg.home;
+
+    // `/bin/ssh` is not at the same path on every DSM build (7.x moved most of
+    // /bin into /usr/bin). Pick the first client that exists unless the flag or
+    // the environment chose one.
+    if (cfg.auth_mode == .ssh and !ssh_bin_set) {
+        if (findSshBinary(allocator)) |found| cfg.ssh_bin = found;
+    }
 
     var ctx = Ctx{ .allocator = allocator, .cfg = cfg };
 
@@ -158,6 +218,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.mem.trimEnd(u8, cfg.base_path, "/"),
         @tagName(cfg.auth_mode),
     });
+    if (cfg.auth_mode == .ssh) {
+        std.debug.print(
+            "synoterm: terminals run `{s} -l <account> {s}:{d}` — sshd does the authentication\n",
+            .{ cfg.ssh_bin, cfg.ssh_host, cfg.ssh_port },
+        );
+    }
     const loopback_only = cfg.bind_addr[0] == 127 and cfg.bind_addr[1] == 0 and
         cfg.bind_addr[2] == 0 and cfg.bind_addr[3] == 1;
     if (!loopback_only) {
@@ -197,9 +263,16 @@ fn usage() error{InvalidArguments} {
         \\  --bind <ipv4>           address to bind (default 127.0.0.1, 0.0.0.0 = LAN)
         \\  --dev-token <secret>    dev mode only: require ?t=<secret> or the matching subprotocol
         \\  --web-root <dir>        static files served (dev mode)
-        \\  --auth dev|dsm          "dev" trusts the caller, "dsm" requires a DSM session
+        \\  --auth dev|dsm|ssh      "dev" trusts the caller, "dsm" requires a DSM session
+        \\                          (cookie + SynoToken), "ssh" logs in over ssh
         \\  --require-group <name>  DSM group required in dsm mode (default: administrators)
-        \\  --shell <path>          fallback shell
+        \\  --ssh-host <host>       ssh mode: login host (default 127.0.0.1)
+        \\  --ssh-port <port>       ssh mode: sshd port (default 22)
+        \\  --ssh-bin <path>        ssh mode: ssh client (default: /usr/bin/ssh, /bin/ssh)
+        \\  --ssh-control-persist <s>  reuse an authenticated ssh connection for <s>s
+        \\                          so a new tab does not ask for the password again
+        \\  --home <dir>            HOME of the service (ssh known_hosts/sockets)
+        \\  --shell <path>          fallback shell (dsm/dev modes)
         \\  --term <name>           TERM value (default xterm-256color)
         \\  --max-sessions <n>      concurrent terminal limit
         \\  --base-path <prefix>    serve every endpoint under this prefix (e.g. /synoterm)
@@ -253,9 +326,9 @@ fn handleConnection(ctx: *Ctx, fd: sys.fd_t) void {
     }
 
     if (std.mem.eql(u8, rel_path, "/healthz")) {
-        var body: [96]u8 = undefined;
-        const json = std.fmt.bufPrint(&body, "{{\"ok\":true,\"version\":\"{s}\",\"api\":{d}}}\n", .{
-            server_version, api_version,
+        var body: [128]u8 = undefined;
+        const json = std.fmt.bufPrint(&body, "{{\"ok\":true,\"version\":\"{s}\",\"api\":{d},\"auth\":\"{s}\"}}\n", .{
+            server_version, api_version, @tagName(ctx.cfg.auth_mode),
         }) catch "{\"ok\":true}\n";
         var headers = util.List(u8).init(allocator);
         defer headers.deinit();
@@ -266,6 +339,10 @@ fn handleConnection(ctx: *Ctx, fd: sys.fd_t) void {
             .body = json,
             .extra_headers = headers.items(),
         }) catch {};
+        return;
+    }
+    if (std.mem.eql(u8, rel_path, "/config.js")) {
+        serveConfigJs(ctx, allocator, fd, request);
         return;
     }
     if (std.mem.eql(u8, rel_path, "/status")) {
@@ -319,6 +396,36 @@ fn handlePreflight(allocator: std.mem.Allocator, fd: sys.fd_t, request: http.Req
     http.send(allocator, fd, .{ .status = 204, .extra_headers = headers.items() }) catch {};
 }
 
+/// Runtime configuration for the bundle, generated from the command line so
+/// one build works at any prefix and port. The packaged `config.js` is only a
+/// fallback for the copy DSM serves from `/webman/3rdparty/synoterm/web/`.
+fn serveConfigJs(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: http.Request) void {
+    if (!std.mem.eql(u8, request.method, "GET") and !std.mem.eql(u8, request.method, "HEAD")) {
+        http.sendError(allocator, fd, 405, "Method not allowed");
+        return;
+    }
+    const body = std.fmt.allocPrint(
+        allocator,
+        "window.SYNOTERM_CONFIG = {{ proxy: \"{s}\", port: {d}, auth: \"{s}\", version: \"{s}\" }};\n",
+        .{
+            std.mem.trimEnd(u8, ctx.cfg.base_path, "/"),
+            ctx.cfg.bind_port,
+            @tagName(ctx.cfg.auth_mode),
+            server_version,
+        },
+    ) catch {
+        http.sendError(allocator, fd, 500, "Out of memory");
+        return;
+    };
+    http.send(allocator, fd, .{
+        .status = 200,
+        .content_type = "text/javascript; charset=utf-8",
+        .body = body,
+        .head_only = std.mem.eql(u8, request.method, "HEAD"),
+        .extra_headers = "Cache-Control: no-store\r\n",
+    }) catch {};
+}
+
 fn serveStatus(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: http.Request) void {
     const cors = corsHeaders(allocator, request, true) catch "";
     const access = checkAccess(ctx, allocator, fd, request, false) catch {
@@ -349,13 +456,14 @@ fn serveStatus(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, request: h
             defer body.deinit();
             body.appendFmt(
                 "{{\"ok\":true,\"user\":\"{s}\",\"sessions\":{d},\"max_sessions\":{d}," ++
-                    "\"version\":\"{s}\",\"api\":{d}}}\n",
+                    "\"version\":\"{s}\",\"api\":{d},\"auth\":\"{s}\"}}\n",
                 .{
-                    identity.user orelse "",
+                    identity.ssh_user orelse (identity.user orelse ""),
                     ctx.active_sessions.load(.monotonic),
                     ctx.cfg.max_sessions,
                     server_version,
                     api_version,
+                    @tagName(ctx.cfg.auth_mode),
                 },
             ) catch return;
             var headers = util.List(u8).init(allocator);
@@ -414,11 +522,14 @@ fn serveStatic(allocator: std.mem.Allocator, fd: sys.fd_t, rel_path: []const u8,
 }
 
 const Identity = struct {
-    /// `null` in dev mode: keep the invoking user.
+    /// `null` in dev/ssh mode: keep the invoking user.
     user: ?[:0]const u8 = null,
     uid: sys.uid_t = 0,
     gid: sys.gid_t = 0,
     home: [:0]const u8 = "/",
+    /// ssh mode: the account typed into the UI. The shell is
+    /// `ssh -l <ssh_user> <host>`, so the password never passes through us.
+    ssh_user: ?[]const u8 = null,
 };
 
 const Denied = struct {
@@ -514,11 +625,27 @@ fn checkAccess(
     }
 
     // --- 2. subprotocols/headers: DSM CSRF token and/or dev shared secret ---
-    const syno_tokens = synoTokenCandidates(allocator, request);
+    const syno_tokens: []const []const u8 = if (ctx.cfg.auth_mode == .dsm)
+        synoTokenCandidates(allocator, request)
+    else
+        &.{};
 
     // --- 3. authenticate ---
     var identity = Identity{};
     switch (ctx.cfg.auth_mode) {
+        .ssh => {
+            // No DSM session is involved: the terminal runs `ssh -l <user>` and
+            // DSM's sshd authenticates it. The UI supplies the account name.
+            const user = queryParam(request.query, "user") orelse "";
+            if (user.len == 0) {
+                if (strict_origin) {
+                    return deny(400, "no login account was given — open the terminal and enter your DSM account");
+                }
+            } else {
+                if (!validLoginName(user)) return deny(400, "invalid account name");
+                identity.ssh_user = user;
+            }
+        },
         .dev => {
             if (ctx.cfg.dev_token) |expected| {
                 const presented = devTokenFromRequest(request, allocator);
@@ -668,21 +795,40 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
     // timeout would silently kill the session after N seconds of no input.
     sys.clearRecvTimeout(fd);
 
-    // --- 6. spawn the shell and bridge ---
+    // --- 6. spawn the shell (or the ssh login) and bridge ---
     var link = Link{ .fd = fd };
 
     const session_ptr = allocator.create(pty_session.Session) catch {
         http.sendError(allocator, fd, 500, "Out of memory");
         return;
     };
-    session_ptr.* = pty_session.spawn(allocator, .{
+
+    var spawn_opts = pty_session.Options{
         .shell = ctx.cfg.default_shell,
         .user = identity.user,
         .uid = identity.uid,
         .gid = identity.gid,
         .home = identity.home,
         .term = ctx.cfg.term,
-    }) catch {
+    };
+    if (identity.ssh_user) |user| {
+        // ssh mode: the remote login prompt *is* the terminal. Password, OTP
+        // and account policy are handled by DSM's sshd, not by us.
+        const args = sshArgs(allocator, ctx.cfg, user) catch {
+            allocator.destroy(session_ptr);
+            http.sendError(allocator, fd, 500, "Out of memory");
+            return;
+        };
+        spawn_opts = .{
+            .shell = ctx.cfg.ssh_bin,
+            .args = args,
+            .login_shell = false,
+            .home = ctx.cfg.home,
+            .term = ctx.cfg.term,
+        };
+    }
+
+    session_ptr.* = pty_session.spawn(allocator, spawn_opts) catch {
         allocator.destroy(session_ptr);
         link.sendText("{\"type\":\"error\",\"code\":\"shell_start_failed\"}");
         return;
@@ -694,7 +840,7 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
 
     var ready_buf: [192]u8 = undefined;
     const ready = std.fmt.bufPrint(&ready_buf, "{{\"type\":\"ready\",\"user\":\"{s}\",\"version\":\"{s}\"}}", .{
-        identity.user orelse "", server_version,
+        identity.ssh_user orelse (identity.user orelse ""), server_version,
     }) catch "{\"type\":\"ready\"}";
     link.sendText(ready);
 
@@ -714,10 +860,20 @@ fn handleWebSocket(ctx: *Ctx, allocator: std.mem.Allocator, fd: sys.fd_t, reques
 fn pumpFn(session_ptr: *pty_session.Session, link: *Link) void {
     var buf: [16 * 1024]u8 = undefined;
     while (true) {
-        const n = session_ptr.readOutput(&buf) catch return;
-        if (n == 0) return;
+        const n = session_ptr.readOutput(&buf) catch break;
+        if (n == 0) break;
         link.sendBinary(buf[0..n]);
     }
+    // The child is gone (`exit`, or ssh could not start). Say so and close the
+    // upgrade: without this the tab looks "connected" until the next keystroke.
+    // The status distinguishes a deliberate exit (0, the tab stays closed) from
+    // a refused login (255, the UI reconnects so the password can be retried).
+    const status = session_ptr.wait();
+    var msg_buf: [64]u8 = undefined;
+    const message = std.fmt.bufPrint(&msg_buf, "{{\"type\":\"exit\",\"code\":{d}}}", .{status}) catch
+        "{\"type\":\"exit\"}";
+    link.sendText(message);
+    link.sendClose();
 }
 
 fn bridgeInput(allocator: std.mem.Allocator, session_ptr: *pty_session.Session, link: *Link) void {
@@ -742,9 +898,7 @@ fn bridgeInput(allocator: std.mem.Allocator, session_ptr: *pty_session.Session, 
                 link.mutex.unlock();
             },
             .close => {
-                link.mutex.lock();
-                ws.writeFrame(link.fd, .close, &.{}) catch {};
-                link.mutex.unlock();
+                link.sendClose();
                 return;
             },
             else => {},
@@ -755,6 +909,81 @@ fn bridgeInput(allocator: std.mem.Allocator, session_ptr: *pty_session.Session, 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// A DSM account name that is safe to hand to `ssh -l`: no leading `-` (which
+/// ssh would read as an option), no shell metacharacters. execve takes it as
+/// one argv entry, so this is defence in depth, not quoting.
+fn validLoginName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 32) return false;
+    if (!(std.ascii.isAlphanumeric(name[0]) or name[0] == '_')) return false;
+    for (name) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.')) return false;
+    }
+    return true;
+}
+
+/// First existing ssh client, or null when none of the usual paths is there.
+fn findSshBinary(allocator: std.mem.Allocator) ?[:0]const u8 {
+    for ([_][]const u8{ "/usr/bin/ssh", "/bin/ssh", "/usr/local/bin/ssh" }) |candidate| {
+        const path = allocator.dupeSentinel(u8, candidate, 0) catch return null;
+        const fd = sys.openRead(path) catch continue;
+        sys.close(fd);
+        return path;
+    }
+    return null;
+}
+
+/// The argv for the ssh login: `ssh -tt -o … -l <user> <host>`.
+///
+/// Deliberate choices:
+///   * no `BatchMode`, no auth restriction: the user may use a key, a password
+///     or 2FA — whatever sshd offers — and every prompt happens in xterm;
+///   * `accept-new` records the loopback host key on first use instead of
+///     failing the first login with "authenticity of host can't be established";
+///   * ControlMaster keeps one authenticated connection for
+///     `--ssh-control-persist` seconds, so opening another tab does not ask for
+///     the password again;
+///   * known_hosts and the control socket live in the package's HOME, which is
+///     writable by the service user.
+fn sshArgs(allocator: std.mem.Allocator, cfg: Config, user: []const u8) ![]const [:0]const u8 {
+    var list = util.List([:0]const u8).init(allocator);
+
+    const literal = struct {
+        fn add(l: *util.List([:0]const u8), a: std.mem.Allocator, text: []const u8) !void {
+            try l.append(try a.dupeSentinel(u8, text, 0));
+        }
+        fn option(l: *util.List([:0]const u8), a: std.mem.Allocator, text: []const u8) !void {
+            try add(l, a, "-o");
+            try add(l, a, text);
+        }
+    };
+
+    const home = std.mem.trimEnd(u8, cfg.home, "/");
+
+    try literal.add(&list, allocator, "-tt");
+    try literal.option(&list, allocator, "StrictHostKeyChecking=accept-new");
+    try literal.add(&list, allocator, "-o");
+    try list.append(try util.allocPrintZ(allocator, "UserKnownHostsFile={s}/.ssh/known_hosts", .{home}));
+    try literal.option(&list, allocator, "ConnectTimeout=10");
+    try literal.option(&list, allocator, "ServerAliveInterval=30");
+    try literal.option(&list, allocator, "NumberOfPasswordPrompts=3");
+    if (cfg.ssh_control_persist > 0) {
+        try literal.option(&list, allocator, "ControlMaster=auto");
+        try literal.add(&list, allocator, "-o");
+        try list.append(try util.allocPrintZ(allocator, "ControlPath={s}/.ssh/cm-%C", .{home}));
+        try literal.add(&list, allocator, "-o");
+        try list.append(try util.allocPrintZ(allocator, "ControlPersist={d}", .{cfg.ssh_control_persist}));
+    } else {
+        try literal.option(&list, allocator, "ControlMaster=no");
+    }
+    try literal.add(&list, allocator, "-l");
+    try list.append(try allocator.dupeSentinel(u8, user, 0));
+    try literal.add(&list, allocator, "-p");
+    try list.append(try util.allocPrintZ(allocator, "{d}", .{cfg.ssh_port}));
+    try list.append(try allocator.dupeSentinel(u8, cfg.ssh_host, 0));
+
+    return list.toOwnedSlice();
+}
 
 fn parseIpv4(text: []const u8) ?[4]u8 {
     var octets: [4]u8 = undefined;
@@ -1039,4 +1268,51 @@ test "request parsing" {
     try std.testing.expectEqualStrings("v=1", req.query);
     try std.testing.expect(req.hasToken("Connection", "upgrade"));
     try std.testing.expect(isWebSocketUpgrade(req));
+}
+
+test "ssh login names are validated before they reach ssh -l" {
+    for ([_][]const u8{ "admin", "alice", "a.b-c_d", "_svc", "u1" }) |name| {
+        try std.testing.expect(validLoginName(name));
+    }
+    // Leading '-' would be read by ssh as an option; the rest would not be one
+    // argv entry in the first place, but there is no reason to accept them.
+    for ([_][]const u8{ "", "-oProxyCommand=evil", "a b", "a;b", "a/b", "a@b", "a=b" }) |name| {
+        try std.testing.expect(!validLoginName(name));
+    }
+}
+
+test "ssh argv is one option per entry and ends with user and host" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var cfg = Config{ .auth_mode = .ssh };
+    cfg.home = "/var/packages/synoterm/var/home";
+    cfg.ssh_control_persist = 0;
+    const args = try sshArgs(allocator, cfg, "alice");
+
+    var has_user = false;
+    var has_control = false;
+    for (args, 0..) |arg, i| {
+        if (std.mem.eql(u8, arg, "-l")) {
+            try std.testing.expectEqualStrings("alice", args[i + 1]);
+            has_user = true;
+        }
+        if (std.mem.indexOfScalar(u8, arg, '=') != null) {
+            // Every `Key=Value` must be preceded by its own `-o`.
+            try std.testing.expect(i > 0);
+            try std.testing.expectEqualStrings("-o", args[i - 1]);
+            if (std.mem.startsWith(u8, arg, "ControlPath=") or std.mem.startsWith(u8, arg, "ControlPersist=")) has_control = true;
+        }
+        try std.testing.expect(!std.mem.startsWith(u8, arg, "-oControl"));
+    }
+    try std.testing.expect(has_user);
+    try std.testing.expect(!has_control); // disabled by ControlPersist=0
+    try std.testing.expectEqualStrings("127.0.0.1", args[args.len - 1]);
+    // The known_hosts file lives under the service HOME.
+    var known = false;
+    for (args) |arg| {
+        if (std.mem.startsWith(u8, arg, "UserKnownHostsFile=/var/packages/synoterm/var/home/.ssh/")) known = true;
+    }
+    try std.testing.expect(known);
 }

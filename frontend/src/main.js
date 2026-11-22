@@ -124,19 +124,41 @@ function backendBase() {
 function chooseBackend(origin, mode) {
   backend = { origin, prefix: apiPrefix(), mode };
   window.synotermBackend = backend; // handy in the browser console / support
-  console.info(`synoterm: backend ${mode} — ${backendBase()}`);
+  console.info(`synoterm: backend ${mode} — ${backendBase()} (auth ${authMode()})`);
   return backend;
 }
 
-async function healthzAnswers(origin, credentials) {
+/**
+ * What the server reported about itself (`/healthz`), e.g.
+ * `{ ok: true, version: "0.1.4", api: 4, auth: "ssh" }`.
+ */
+let serverInfo = null;
+
+/**
+ * How the terminal authenticates, as decided by the server:
+ *   "ssh" — `ssh -l <user>`; the login prompt is the terminal (no DSM session)
+ *   "dsm" — DSM cookie + SynoToken scraped from the desktop page
+ *   "dev" — no authentication (development only)
+ * Falls back to what the packaged config.js carries, then to "dsm".
+ */
+function authMode() {
+  const reported = serverInfo?.auth;
+  if (typeof reported === "string" && reported.length > 0) return reported;
+  const configured = apiConfig().auth;
+  return typeof configured === "string" && configured.length > 0 ? configured : "dsm";
+}
+
+async function healthzInfo(origin, credentials) {
   try {
     const response = await fetch(`${origin}${apiPrefix()}/healthz`, {
       credentials,
       cache: "no-store",
     });
-    return response.ok;
+    if (!response.ok) return null;
+    const info = await response.json().catch(() => ({}));
+    return info || {};
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -162,12 +184,20 @@ async function resolveBackend() {
 
   // Already talking to our own server? Then stay on this origin.
   if (Number.isFinite(config.port) && String(config.port) === window.location.port) {
+    serverInfo = await healthzInfo(window.location.origin, "same-origin");
     return chooseBackend(window.location.origin, "direct");
   }
 
-  // 1. the mount on the origin that served this page (the normal case).
-  if (prefix && (await healthzAnswers(window.location.origin, "same-origin"))) {
-    return chooseBackend(window.location.origin, "proxy");
+  // Every probe below also learns how the server authenticates, so the UI can
+  // ask for a login name (ssh) or scrape the DSM token (dsm) before the first
+  // upgrade.
+  //
+  // 1. the origin that served this page: the nginx mount at /synoterm, or —
+  //    with an empty prefix — a reverse proxy that maps the site root straight
+  //    onto the backend.
+  serverInfo = await healthzInfo(window.location.origin, "same-origin");
+  if (serverInfo) {
+    return chooseBackend(window.location.origin, prefix ? "proxy" : "same-origin");
   }
 
   // 2. the same mount on DSM's HTTPS vhost. DSM is often opened on :5000 while
@@ -177,7 +207,8 @@ async function resolveBackend() {
   const httpsPort = Number.isFinite(config.httpsPort) ? config.httpsPort : 5001;
   if (prefix && window.location.protocol === "http:" && String(httpsPort) !== window.location.port) {
     const origin = `https://${window.location.hostname}:${httpsPort}`;
-    if (await healthzAnswers(origin, "include")) {
+    serverInfo = await healthzInfo(origin, "include");
+    if (serverInfo) {
       console.warn(
         `synoterm: DSM is open over HTTP but the mount lives on ${origin} — ` +
           `reopen DSM at ${origin}/ for session cookies to be sent`,
@@ -188,8 +219,11 @@ async function resolveBackend() {
 
   // 3. no mount anywhere: talk to the package's own port.
   if (Number.isFinite(config.port) && config.port > 0) {
-    return chooseBackend(`${window.location.protocol}//${window.location.hostname}:${config.port}`, "direct");
+    const origin = `${window.location.protocol}//${window.location.hostname}:${config.port}`;
+    serverInfo = await healthzInfo(origin, "include");
+    return chooseBackend(origin, "direct");
   }
+  serverInfo = await healthzInfo(window.location.origin, "same-origin");
   return chooseBackend(window.location.origin, "same-origin");
 }
 
@@ -458,6 +492,108 @@ function devToken() {
   return new URLSearchParams(window.location.search).get("t") || "";
 }
 
+/**
+ * ssh mode: the account the terminal logs in as.
+ *
+ * The server runs `ssh -l <user> <host>`, so the terminal *is* the login prompt
+ * and no DSM cookie or SynoToken is needed. The name is taken from `?user=`, then
+ * from the last login this browser made, otherwise asked for once.
+ */
+const SSH_USER_KEY = "synoterm.user";
+
+function urlUser() {
+  return new URLSearchParams(window.location.search).get("user") || "";
+}
+
+function storedUser() {
+  try {
+    return window.localStorage.getItem(SSH_USER_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+let sshUser = urlUser() || storedUser();
+let userPrompt = null;
+
+function currentUser() {
+  if (sshUser) return Promise.resolve(sshUser);
+  if (userPrompt) return userPrompt.promise;
+  const pending = {};
+  pending.promise = new Promise((resolve) => {
+    pending.resolve = resolve;
+  });
+  userPrompt = pending;
+  showLoginPrompt();
+  return pending.promise;
+}
+
+function showLoginPrompt() {
+  const box = document.getElementById("login");
+  const input = document.getElementById("login-user");
+  const hint = document.getElementById("login-hint");
+  if (hint) {
+    hint.textContent = "The terminal logs in over SSH: your DSM account and password are typed there.";
+  }
+  if (!box || !input) return;
+  box.hidden = false;
+  input.value = "";
+  input.focus();
+}
+
+function submitUser(value) {
+  const name = String(value || "").trim();
+  const hint = document.getElementById("login-hint");
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}$/.test(name)) {
+    if (hint) hint.textContent = "Use a DSM account name (letters, digits, _ . -).";
+    return false;
+  }
+  sshUser = name;
+  try {
+    window.localStorage.setItem(SSH_USER_KEY, name);
+  } catch {
+    /* private mode: ask again next time */
+  }
+  const box = document.getElementById("login");
+  if (box) box.hidden = true;
+  const pending = userPrompt;
+  userPrompt = null;
+  if (pending) pending.resolve(name);
+  return true;
+}
+
+function wireLoginPrompt() {
+  const form = document.getElementById("login-form");
+  if (!form) return;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitUser(document.getElementById("login-user").value);
+  });
+  const forget = document.getElementById("login-forget");
+  if (forget) {
+    forget.addEventListener("click", () => {
+      try {
+        window.localStorage.removeItem(SSH_USER_KEY);
+      } catch {
+        /* ignore */
+      }
+      sshUser = "";
+      showLoginPrompt();
+    });
+  }
+}
+
+/** Adds `?user=` to the upgrade URL (a WebSocket carries no request headers). */
+function urlWithUser(url, user) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    parsed.searchParams.set("user", user);
+    return parsed.toString();
+  } catch {
+    return `${url}${url.includes("?") ? "&" : "?"}user=${encodeURIComponent(user)}`;
+  }
+}
+
 class Session {
   /**
    * `pane` must already be in the document *and visible*: xterm measures the
@@ -568,14 +704,26 @@ class Session {
 
   async openSocket() {
     await resolveBackend();
-    const url = wsUrl();
+    let url = wsUrl();
     const protocols = [];
     const dev = devToken();
     if (dev) protocols.push(`synoterm.dev-token.${base64url(dev)}`);
-    await discoverSynoToken();
-    // One subprotocol per candidate: RFC 6455 allows several, the server echoes
-    // the one it used, and it tries them in order until DSM accepts one.
-    for (const token of synoTokens()) protocols.push(synoTokenSubprotocol(token));
+    if (authMode() === "ssh") {
+      // Own login: the account name travels in the URL, the password is typed
+      // into the terminal (ssh's own prompt) and never reaches JavaScript.
+      const user = await currentUser();
+      if (!user) {
+        this.setState("closed");
+        return;
+      }
+      url = urlWithUser(url, user);
+    } else if (authMode() === "dsm") {
+      await discoverSynoToken();
+      // One subprotocol per candidate: RFC 6455 allows several, the server
+      // echoes the one it used, and it tries them in order until DSM accepts
+      // one.
+      for (const token of synoTokens()) protocols.push(synoTokenSubprotocol(token));
+    }
 
     this.setState("connecting");
     let socket;
@@ -615,7 +763,9 @@ class Session {
     });
 
     socket.addEventListener("error", () => {
-      if (this.socket === socket) this.setState("error");
+      // A deliberate exit also closes the socket; do not paint that as a
+      // failure (browsers fire `error` for some close sequences).
+      if (this.socket === socket && !this.closedByUser) this.setState("error");
     });
   }
 
@@ -636,7 +786,12 @@ class Session {
       this.setState("error");
       this.term.write(`\r\n\x1b[31m${message.code || "error"}\x1b[0m\r\n`);
     } else if (message.type === "exit") {
+      // 0: the shell or the ssh login ended on purpose — keep the tab closed
+      // instead of reconnecting. Anything else (ssh exits 255 when the password
+      // or account is refused) keeps the reconnect so the login can be retried.
+      if (message.code === 0 || message.code === undefined) this.closedByUser = true;
       this.setState("closed");
+      this.manager.updateStatus();
     }
   }
 
@@ -658,8 +813,9 @@ class Session {
    */
   async explainFailure() {
     const target = apiPath("status");
-    await discoverSynoToken();
-    const tokens = synoTokens();
+    const sshMode = authMode() === "ssh";
+    if (!sshMode) await discoverSynoToken();
+    const tokens = sshMode ? [] : synoTokens();
     try {
       const response = await fetch(target, {
         credentials: "include",
@@ -684,9 +840,11 @@ class Session {
       }
       if (!response.ok) {
         const reason = info?.reason || `HTTP ${response.status}`;
-        const tokenNote = tokens.length > 0
-          ? ` (DSM token from ${tokenCache.source}, ${tokens.length} candidate(s))`
-          : " (no DSM token presented — open the terminal from the DSM desktop)";
+        const tokenNote = sshMode
+          ? ""
+          : tokens.length > 0
+            ? ` (DSM token from ${tokenCache.source}, ${tokens.length} candidate(s))`
+            : " (no DSM token presented — open the terminal from the DSM desktop)";
         // A refused token is the common cause: ask the package's own CGI what
         // DSM says about the string we scraped (console only), then drop the
         // cache so the next reconnect re-discovers candidates. The note above
@@ -700,6 +858,14 @@ class Session {
         return;
       }
       const user = info?.user ? ` as ${info.user}` : "";
+      if (sshMode) {
+        const hint =
+          "the ssh login did not complete — wrong account/password, or the SSH " +
+          "service is off (Control Panel → Terminal & SNMP)";
+        this.manager.setNotice(hint, true);
+        this.term.write(`\r\n\x1b[33m${hint}\x1b[0m\r\n`);
+        return;
+      }
       this.term.write(
         `\r\n\x1b[33mdisconnected${user}; the server is reachable — retrying…\x1b[0m\r\n`,
       );
@@ -1035,6 +1201,12 @@ async function boot() {
 
   const manager = new TabManager(document.getElementById("terminal-host"));
   window.synoterm = manager;
+  wireLoginPrompt();
+
+  // ssh mode asks for the account before the first tab connects; the password
+  // is then typed into the terminal itself.
+  await resolveBackend();
+  if (authMode() === "ssh") await currentUser();
 
   // xterm measures its cell size from the rendered font; do it once fonts are
   // settled, otherwise rows can render with the wrong advance width.

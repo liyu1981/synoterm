@@ -7,7 +7,8 @@
 // Requires a Chromium/Chrome binary. Discovery order:
 //   $SYNOTERM_CHROMIUM, playwright's cache, system chromium/chrome.
 import { spawn } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -105,6 +106,34 @@ if (!ready) {
   console.error("e2e: server did not start");
   server.kill();
   process.exit(1);
+}
+
+/** Status line of a raw HTTP/1.1 request (fetch() refuses Upgrade headers). */
+function rawStatus(port, path, headers = []) {
+  return new Promise((resolve) => {
+    const socket = connect(Number(port), "127.0.0.1", () => {
+      const request = [
+        `GET ${path} HTTP/1.1`,
+        `Host: 127.0.0.1:${port}`,
+        ...headers.map(([name, value]) => `${name}: ${value}`),
+        "",
+        "",
+      ].join("\r\n");
+      socket.write(request);
+    });
+    let data = "";
+    const finish = () => {
+      socket.destroy();
+      const match = /^HTTP\/1\.1 (\d{3})/.exec(data);
+      resolve(match ? Number(match[1]) : 0);
+    };
+    socket.setTimeout(2000, finish);
+    socket.on("data", (chunk) => {
+      data += chunk;
+      if (data.includes("\r\n")) finish();
+    });
+    socket.on("error", () => resolve(0));
+  });
 }
 
 const failures = [];
@@ -335,6 +364,108 @@ try {
   }
   await pkgContext.close();
   rmSync(pkgRoot, { recursive: true, force: true });
+
+  // ---- ssh mode at the proxy root: the terminal is the login prompt --------
+  // No DSM cookie or token is involved: the UI asks for an account name, the
+  // server runs `ssh -l <user> <host>`, and ssh asks for the password in the
+  // terminal. A stub ssh binary stands in for DSM's sshd here. No --base-path:
+  // this is the https://nas:7171/ reverse-proxy deployment, where every
+  // endpoint sits at the origin root.
+  const sshPort = String(Number(PORT) + 2);
+  const sshRoot = mkdtempSync(join(tmpdir(), "synoterm-e2e-ssh-"));
+  cpSync(join(root, "frontend", "dist"), sshRoot, { recursive: true });
+  const fakeSsh = join(sshRoot, "fake-ssh");
+  writeFileSync(
+    fakeSsh,
+    '#!/bin/sh\necho "FAKE-SSH $*"\necho "shell up"\nsleep 2\nexit 0\n',
+    { mode: 0o755 },
+  );
+  const sshHome = join(sshRoot, "home");
+  mkdirSync(join(sshHome, ".ssh"), { recursive: true });
+  const sshBase = `http://127.0.0.1:${sshPort}`;
+  const sshServer = spawn(
+    binary,
+    ["--listen", sshPort, "--auth", "ssh", "--ssh-bin", fakeSsh, "--home", sshHome,
+     "--web-root", sshRoot],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  extraServers.push(sshServer);
+  const sshUp = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 5000);
+    sshServer.stderr.on("data", (chunk) => {
+      if (String(chunk).includes("listening")) {
+        clearTimeout(timer);
+        resolve(true);
+      }
+    });
+  });
+  if (!sshUp) failures.push("ssh-mode server did not start");
+
+  const health = await (await fetch(`${sshBase}/healthz`)).json().catch(() => ({}));
+  if (health.auth !== "ssh") failures.push(`healthz reported auth ${JSON.stringify(health.auth)}`);
+  // The binary generates config.js from its own flags, so the bundle never needs
+  // a rebuild for a different prefix/port.
+  const configJs = await (await fetch(`${sshBase}/config.js`)).text();
+  if (!configJs.includes('proxy: ""') || !configJs.includes('auth: "ssh"')) {
+    failures.push(`generated config.js is wrong: ${configJs.trim()}`);
+  }
+
+  // A name that ssh would read as an option must be refused before a process
+  // is spawned.
+  const upgradeHeaders = [
+    ["Connection", "Upgrade"],
+    ["Upgrade", "websocket"],
+    ["Sec-WebSocket-Version", "13"],
+    ["Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="],
+    ["Origin", sshBase],
+  ];
+  const rejected = await rawStatus(sshPort, "/ws?user=-oProxyCommand=x", upgradeHeaders);
+  if (rejected !== 400) failures.push(`ssh mode accepted an invalid account (${rejected})`);
+  const noUser = await rawStatus(sshPort, "/ws", upgradeHeaders);
+  if (noUser !== 400) failures.push(`ssh mode accepted an upgrade without an account (${noUser})`);
+  const accepted = await rawStatus(sshPort, "/ws?user=alice", upgradeHeaders);
+  if (accepted !== 101) failures.push(`ssh mode refused a valid account (${accepted})`);
+
+  const sshContext = await browser.newContext();
+  const sshPage = await sshContext.newPage();
+  sshPage.on("pageerror", (error) => failures.push(`pageerror (ssh): ${error}`));
+  await sshPage.goto(`${sshBase}/`, { waitUntil: "load" });
+  await sshPage.waitForSelector("#login:not([hidden])", { timeout: 5000 });
+  await sshPage.fill("#login-user", "alice");
+  await sshPage.click("#login-form button[type=submit]");
+  await sshPage.waitForFunction(
+    () => document.querySelector("#status-text")?.textContent?.startsWith("connected"),
+    { timeout: 8000 },
+  );
+  await sshPage.waitForTimeout(600);
+  const sshScreen = await sshPage.evaluate(
+    () => document.querySelector(".terminal-pane.active .xterm-rows")?.innerText || "",
+  );
+  if (!sshScreen.includes("FAKE-SSH")) failures.push("ssh mode did not run the ssh binary");
+  if (!sshScreen.includes("-l alice")) failures.push(`ssh argv lacked the account: ${sshScreen.slice(0, 160)}`);
+  if (!sshScreen.includes("known_hosts")) failures.push("ssh argv has no UserKnownHostsFile");
+  // At the root the UI must stay on its own origin (the reverse proxy), not
+  // fall back to the package's :7381 port — that fallback is in another
+  // security context and would be refused by the same-origin check there.
+  const sshBackend = await sshPage.evaluate(() => window.synotermBackend);
+  if (sshBackend?.origin !== sshBase || sshBackend?.prefix !== "") {
+    failures.push(`ssh root UI chose ${JSON.stringify(sshBackend)}`);
+  }
+  // The account is remembered, so a reload does not ask again.
+  await sshPage.reload({ waitUntil: "load" });
+  const prompted = await sshPage.evaluate(() => document.getElementById("login")?.hidden === false);
+  if (prompted) failures.push("ssh mode asked for the account again after it was remembered");
+  // The stub exits 0 after 2s: a deliberate logout must settle on "closed" and
+  // not reconnect (a reconnect would ask for the password again).
+  await sshPage.waitForFunction(
+    () => document.querySelector("#status-text")?.textContent?.startsWith("closed"),
+    { timeout: 12000 },
+  );
+  await sshPage.waitForTimeout(1500);
+  const settled = await sshPage.textContent("#status-text");
+  if (!settled.startsWith("closed")) failures.push(`exited ssh session did not stay closed: "${settled}"`);
+  await sshContext.close();
+  rmSync(sshRoot, { recursive: true, force: true });
 } catch (error) {
   failures.push(String(error));
 } finally {

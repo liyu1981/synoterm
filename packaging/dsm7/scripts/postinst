@@ -4,15 +4,26 @@
 set -eu
 
 VAR="${SYNOPKG_PKGVAR}"
-mkdir -p "${VAR}/home" "${VAR}/runtime" "${VAR}/etc"
-chmod 700 "${VAR}/home" "${VAR}/runtime"
+mkdir -p "${VAR}/home" "${VAR}/runtime" "${VAR}/etc" "${VAR}/home/.ssh"
+# ssh keeps known_hosts and its ControlMaster socket in HOME; 700 because that
+# socket lets whoever can reach it ride an already authenticated login.
+chmod 700 "${VAR}/home" "${VAR}/runtime" "${VAR}/home/.ssh"
 
 # Never overwrite an existing config on upgrade.
 if [ ! -f "${VAR}/etc/synoterm.conf" ]; then
   cat >"${VAR}/etc/synoterm.conf" <<'CONF'
 # synoterm service settings (read by start-stop-status).
 #
-# Group a DSM account must belong to in order to open a terminal.
+# How a terminal authenticates:
+#   ssh   (default) the terminal runs `ssh -l <account> 127.0.0.1`, so DSM's own
+#         sshd asks for the password / 2FA code inside the terminal. The SSH
+#         service must be enabled (Control Panel -> Terminal & SNMP). No DSM
+#         cookie or SynoToken is involved and the binary needs no privileges.
+#   dsm   the browser's DSM session (cookie + SynoToken) identifies the user;
+#         needs a build with SYNOTERM_SETUID=1 to fork a shell as that account.
+AUTH="ssh"
+#
+# dsm mode: group a DSM account must belong to in order to open a terminal.
 # Set to an empty string to allow every authenticated local DSM account.
 REQUIRE_GROUP="administrators"
 #
@@ -20,11 +31,25 @@ REQUIRE_GROUP="administrators"
 MAX_SESSIONS="8"
 #
 # Listen address of the backend:
-#   auto      loopback when the nginx mount from contrib/ is installed, otherwise
-#             0.0.0.0 so the DSM-served page can reach it from your browser
-#   127.0.0.1 only loopback (the mount or a reverse proxy must be in place)
-#   0.0.0.0   always reachable on the LAN (still requires a DSM login)
+#   auto      loopback in ssh mode (reach it through DSM's web server: a
+#             reverse-proxy rule or contrib/install-nginx-mount.sh), otherwise
+#             loopback if the contrib snippet exists, else 0.0.0.0
+#   127.0.0.1 only loopback (a reverse proxy or the contrib snippet must exist)
+#   0.0.0.0   always reachable on the LAN — ssh mode then offers a login prompt
+#             to the whole network; keep DSM's auto-block enabled
 BIND="auto"
+#
+# Path prefix every endpoint lives under. "" serves the app at the proxy root
+# (https://nas:7171/); the packaged DSM desktop entry expects /synoterm.
+BASE_PATH="/synoterm"
+#
+# ssh mode: the login target. Always this NAS, so DSM's own sshd authenticates.
+SSH_HOST="127.0.0.1"
+SSH_PORT="22"
+#
+# ssh mode: seconds an authenticated connection is reused, so opening a second
+# tab does not ask for the password again. 0 disables connection sharing.
+SSH_CONTROL_PERSIST="600"
 #
 # Extra flags appended to the command line, e.g.:
 # EXTRA_ARGS="--idle-timeout 3600"

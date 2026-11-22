@@ -16,8 +16,14 @@ extern "c" fn getgrouplist(user: [*:0]const u8, group: c_uint, groups: [*]sys.gi
 pub const max_groups: usize = 64;
 
 pub const Options = struct {
-    /// Absolute path to the shell, e.g. "/bin/bash".
+    /// Absolute path to the program, e.g. "/bin/bash" or "/bin/ssh".
     shell: [:0]const u8,
+    /// Arguments after argv[0]. Empty for a plain login shell; ssh mode passes
+    /// `-l <user> …` here.
+    args: []const [:0]const u8 = &.{},
+    /// Prefix argv[0] with `-` (login-shell convention: `-bash`). Must be off
+    /// for programs that parse their own argv[0], such as ssh.
+    login_shell: bool = true,
     /// Login name; `null` keeps the current (already authenticated) user.
     user: ?[:0]const u8 = null,
     uid: sys.uid_t = 0,
@@ -115,8 +121,17 @@ pub fn spawn(allocator: std.mem.Allocator, opts: Options) SpawnError!Session {
     }
 
     // ---- argv / envp ----
-    const argv0 = try util.allocPrintZ(allocator, "-{s}", .{std.fs.path.basename(opts.shell)});
+    const argv0 = if (opts.login_shell)
+        try util.allocPrintZ(allocator, "-{s}", .{std.fs.path.basename(opts.shell)})
+    else
+        try allocator.dupeSentinel(u8, opts.shell, 0);
     try owned.append(argv0);
+
+    var argv_ptrs = util.List(?[*:0]const u8).init(allocator);
+    defer argv_ptrs.deinit();
+    try argv_ptrs.append(argv0.ptr);
+    for (opts.args) |arg| try argv_ptrs.append(arg.ptr);
+    try argv_ptrs.append(null);
 
     var envp = util.List(?[*:0]const u8).init(allocator);
     defer envp.deinit();
@@ -149,8 +164,6 @@ pub fn spawn(allocator: std.mem.Allocator, opts: Options) SpawnError!Session {
     errdefer sys.close(pty.master);
     sys.setWinsize(pty.master, opts.rows, opts.cols) catch {};
 
-    const argv = [_:null]?[*:0]const u8{argv0.ptr};
-
     const child = sys.libcFork() catch return error.ForkFailed;
 
     if (child == 0) {
@@ -169,7 +182,7 @@ pub fn spawn(allocator: std.mem.Allocator, opts: Options) SpawnError!Session {
             sys.setuid(opts.uid) catch sys.exitNow(126);
         }
         sys.chdir(opts.home) catch {};
-        sys.execveZ(opts.shell.ptr, &argv, @ptrCast(envp.items().ptr)) catch {};
+        sys.execveZ(opts.shell.ptr, @ptrCast(argv_ptrs.items().ptr), @ptrCast(envp.items().ptr)) catch {};
         sys.exitNow(127);
     }
 

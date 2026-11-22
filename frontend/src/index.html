@@ -27,6 +27,27 @@
         </div>
       </header>
       <main id="terminal-host"></main>
+      <div id="login" class="login" hidden>
+        <form id="login-form" class="login-box">
+          <h2>Terminal login</h2>
+          <label for="login-user">DSM account</label>
+          <input
+            id="login-user"
+            name="user"
+            type="text"
+            spellcheck="false"
+            autocapitalize="off"
+            autocomplete="username"
+            placeholder="e.g. admin"
+          />
+          <p id="login-hint" class="hint">
+            The terminal logs in over SSH: your DSM account and password are typed there.
+          </p>
+          <div class="settings-actions">
+            <button type="submit">Connect</button>
+          </div>
+        </form>
+      </div>
       <div id="settings-panel" class="settings-panel" hidden>
         <h2>Terminal appearance</h2>
         <label for="set-font-family">Font family</label>

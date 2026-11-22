@@ -1,0 +1,15 @@
+{
+  "defaults": {
+    "run-as": "package"
+  },
+  "username": "synoterm",
+  "groupname": "synoterm",
+  "tool": [
+    {
+      "relpath": "bin/synoterm",
+      "user": "root",
+      "group": "package",
+      "permission": "4750"
+    }
+  ]
+}
