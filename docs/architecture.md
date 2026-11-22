@@ -3,7 +3,7 @@
 ## 1. Process and thread model
 
 ```
-synoterm process (starts setuid root, only the PTY spawn is privileged)
+synoterm process (unprivileged in AUTH="ssh"; a setuid tool only in "dsm")
 ├── thread: accept loop              blocking accept(2) on 127.0.0.1:7381
 ├── thread: connection #1
 │    ├── read request head (HTTP)
@@ -34,21 +34,33 @@ toolchain bump should only require editing those two files; `main.zig`,
 
 ## 2. Session lifecycle
 
+The PTY plumbing is the same in both auth modes; only what the child *is*
+differs:
+
+* `AUTH="ssh"` (default) — the child is the ssh client
+  (`ssh -tt -o … -l <account> 127.0.0.1`) and DSM's sshd shows the password/OTP
+  prompt **inside xterm**. The process never leaves the unprivileged package
+  user and no DSM API is called.
+* `AUTH="dsm"` — `authenticate.cgi` maps the browser's cookie + SynoToken to an
+  account, and the child is a login shell forked as that user, which needs the
+  setuid `tool` build (`SYNOTERM_SETUID=1`).
+
 ```
 browser                         synoterm                        kernel
-  │  GET /synoterm/ws                │                              │
+  │  GET /synoterm/ws?user=…         │                              │
   │  Upgrade: websocket              │                              │
   ├─────────────────────────────────▶│                              │
   │                                  │ check Origin == Host         │
-  │                                  │ run authenticate.cgi ────────┼─▶ DSM
-  │                                  │ id -Gn <user> ───────────────┼─▶ NSS
-  │  101 + Sec-WebSocket-Protocol    │                              │
+  │                                  │ ssh: validate the account    │
+  │                                  │ dsm: authenticate.cgi ───────┼─▶ DSM
+  │                                  │      id -Gn <user> ──────────┼─▶ NSS
+  │  101                             │                              │
   │◀─────────────────────────────────┤                              │
   │                                  │ open /dev/ptmx ──────────────┼─▶ pty
   │                                  │ fork()                       │
   │                                  │   setsid, TIOCSCTTY          │
-  │                                  │   setgroups/setgid/setuid    │
-  │                                  │   exec "-bash"               │
+  │                                  │   (dsm) setgroups/setgid/setuid
+  │                                  │   exec ssh -l <user> | -bash │
   │  {"type":"ready"}                │                              │
   │◀─────────────────────────────────┤                              │
   │  binary: keystrokes              │                              │
@@ -61,7 +73,8 @@ browser                         synoterm                        kernel
   ├─────────────────────────────────▶│ kill(-pid, SIGHUP)           │
   │                                  │ join(pump)                   │
   │                                  │ waitpid()                    │
-  │                                  │ close(master), free strings  │
+  │  {"type":"exit","code":n}        │                              │
+  │◀─────────────────────────────────┤ close(master), free strings  │
 ```
 
 Ordering that matters:
@@ -69,25 +82,29 @@ Ordering that matters:
 * `setsid()` **before** `TIOCSCTTY`, and the slave must not yet be the
   controlling terminal.
 * `setgroups()` → `setgid()` → `setuid()`, in that order; `setuid` as root
-  drops all three uids on Linux and cannot be undone.
+  drops all three uids on Linux and cannot be undone. (dsm mode only.)
 * All allocations, `getgrouplist()` and NSS lookups happen **before** `fork()`;
   the child only performs async-signal-safe syscalls.
 * On teardown, SIGHUP the *process group* (so `vim`/`htop`/subshells die), let
   the pump observe EOF, and only then reap and close — closing the master while
   another thread is blocked reading it is a race.
+* The pump reports the child's exit status (`{"type":"exit","code":n}`) and
+  closes once; `code` 0 means a deliberate `exit`, ssh's 255 a refused login.
+  Only one close frame may be sent (`Link.sendClose`), otherwise browsers log
+  "Close received after close" and fire an `error` event.
 
 ## 3. Module map
 
 | File | Responsibility | Depends on |
 | --- | --- | --- |
-| `src/main.zig` | CLI/env config, routing, auth orchestration, session wiring, tests | all |
+| `src/main.zig` | CLI/env config, routing, auth per mode (dev/dsm/ssh), ssh argv, session wiring, tests | all |
 | `src/http.zig` | request-head parse, header access, static file serving, MIME, path traversal guard | `sys` |
 | `src/ws.zig` | RFC 6455 handshake, frame codec (masking, fragmentation, control frames), 1 MiB cap | `sys`, `util` |
-| `src/session.zig` | PTY open, fork/exec, user switch, env/argv lifetime, resize, output pump | `sys`, `ws`, `util` |
-| `src/auth.zig` | CGI env construction, `runCapture()` (pipe+fork+exec), authenticate.cgi | `sys`, `util` |
+| `src/session.zig` | PTY open, fork/exec of an arbitrary argv (ssh or shell), optional user switch, env/argv lifetime, resize, output pump | `sys`, `ws`, `util` |
+| `src/auth.zig` | dsm mode only: CGI env construction, `runCapture()` (pipe+fork+exec), authenticate.cgi | `sys`, `util` |
 | `src/sys.zig` | sockets, PTY ioctls, process control, waitpid, users, `/etc/passwd` | `std.os.linux`, libc externs |
 | `src/util.zig` | `List(T)` (0.17 unmanaged ArrayList + captured allocator), futex `Mutex`, `allocPrintZ` | `std` |
-| `frontend/src/main.js` | tab manager, xterm.js terminals, WS client, token subprotocol | xterm.js, addons |
+| `frontend/src/main.js` | tab manager, xterm.js terminals, WS client, login prompt (ssh) / token subprotocol (dsm) | xterm.js, addons |
 | `packaging/dsm7/*` | DSM metadata, nginx snippet, Vue wrapper, lifecycle scripts | — |
 
 ## 4. Frontend
@@ -140,25 +157,30 @@ Two hard-won rules, each guarding against a bug seen on a real NAS:
 
 Trust boundaries:
 
-1. **Browser → DSM nginx** — DSM's TLS and session cookie.
-2. **DSM nginx → 127.0.0.1:7381** — loopback only; the nginx snippet is the
-   only ingress.
-3. **synoterm → DSM** — `authenticate.cgi` and `id` are read-only lookups; no
-   credentials are ever stored or forwarded.
-4. **synoterm → kernel** — the only privileged operations are `openpt`,
-   `fork`, `setgroups/setgid/setuid` and `ioctl(TIOCSWINSZ)`.
+1. **Browser → DSM nginx** — DSM's TLS (reverse proxy or the contrib snippet).
+2. **DSM nginx → 127.0.0.1:7381** — loopback only; DSM's web server is the only
+   ingress in both shipped deployments.
+3. **synoterm → DSM** — ssh mode: the ssh client is the *only* thing that talks
+   to DSM, and the password goes browser → pty → ssh → sshd without synoterm
+   inspecting it. dsm mode: `authenticate.cgi` and `id` are read-only lookups;
+   no credentials are stored or forwarded.
+4. **synoterm → kernel** — in ssh mode the process is unprivileged: `openpt`,
+   `fork`, `execve`, `ioctl(TIOCSWINSZ)`. Only the dsm-mode build adds
+   `setgroups/setgid/setuid`.
 
 Threats and mitigations:
 
 | Threat | Mitigation |
 | --- | --- |
-| Cross-site WebSocket hijack | `Origin` host must equal `Host`; optional `SynoToken` requirement (M4) |
-| Privilege escalation via the setuid binary | no shell invocation, no `exec` of user-supplied paths, fixed-format inputs, session count cap, M4 privileged-spawner split |
+| Cross-site WebSocket hijack | `Origin` host must equal `Host` (both modes); a SynoToken is additionally required in dsm mode |
+| Credential theft | ssh mode: the password only exists in the pty stream; it is never parsed, logged or stored. dsm mode: no credential is involved at all |
+| Brute force | ssh mode: DSM's own sshd limits (`MaxAuthTries`, 3 password prompts per session) and DSM auto-block; the login prompt is loopback-only unless `BIND=0.0.0.0` |
+| Privilege escalation via the setuid binary | only the opt-in dsm build has one; no shell invocation, no `exec` of user-supplied paths, fixed-format inputs, session count cap |
 | Path traversal on static files | segment-wise resolution, `.`/`..` rejected, no symlink follow-out, 404 not 403 for misses |
 | Memory exhaustion | 1 MiB WS message cap, 16 KiB HTTP head cap, 32 MiB static file cap, bounded sessions, 16 KiB pump buffer |
 | Secret leakage in logs | no terminal content is logged; nginx `access_log off` for the mount |
 | Orphaned processes | one SIGHUP per socket close, `waitpid`, package stop kills the group |
-| Root process exposed to the network | M4: network process drops to the package user; only a minimal spawner stays root |
+| Root process exposed to the network | ssh mode has no privileged process at all; dsm mode: the network process drops to the package user, only the spawn is privileged |
 
 ## 6. Data flow for the M3 persistence layer
 
@@ -181,8 +203,10 @@ snapshot first, then the bytes that arrived after the snapshot was taken
 
 | Failure | Result |
 | --- | --- |
-| `authenticate.cgi` missing/errors | 500, nothing spawned |
-| Not an administrator | 403 before the handshake completes |
+| `authenticate.cgi` missing/errors (dsm) | 500, nothing spawned |
+| Not an administrator (dsm) | 403 before the handshake completes |
+| ssh client missing / sshd not running (ssh) | the pty exists, ssh writes the reason into the terminal and exits 255; the UI reconnects so the password can be retried |
+| No account name on the upgrade (ssh) | 400 before any process is spawned (a leading `-` is refused too) |
 | `fork`/`exec` fails | `{"type":"error","code":"shell_start_failed"}` then close |
 | Socket drops | shell gets SIGHUP (M0–M2) or stays alive for reattach (M3) |
 | Package stop | all sessions in the process group get SIGHUP |

@@ -441,13 +441,31 @@ case "${backend}" in
 esac
 
 conf_file="${PKG_DIR}/../var/etc/synoterm.conf"
-if [ -r "${conf_file}" ] && grep -q '^BIND=.*auto' "${conf_file}"; then
+auth=$(grep -E '^AUTH=' "${conf_file}" 2>/dev/null | head -1 | tr -d '"' | cut -d= -f2)
+[ -n "${auth}" ] || auth=ssh
+base=$(grep -E '^BASE_PATH=' "${conf_file}" 2>/dev/null | head -1 | tr -d '"' | cut -d= -f2)
+[ -n "${base}" ] || base=/synoterm
+
+if [ "${auth}" = "dsm" ] && grep -q '^BIND=.*auto' "${conf_file}" 2>/dev/null; then
   echo
   echo "    note: BIND=\"auto\" — restart the service so it stops listening on 0.0.0.0"
   echo "          now that the mount exists:  synopkg restart synoterm"
 fi
 
+if [ "${base}" != "/synoterm" ]; then
+  echo
+  echo "warn: the snippet proxies /synoterm/ but BASE_PATH=\"${base}\" in"
+  echo "      ${conf_file}"
+  echo "      the mount will 404 until you either set BASE_PATH=\"/synoterm\" or"
+  echo "      create a DSM reverse-proxy rule for that path instead (docs/dsm-integration.md §4.3)."
+fi
+
 echo
-echo "done. Open DSM → main menu → Terminal."
+if [ "${auth}" = "ssh" ]; then
+  echo "done. Open https://<nas>:5001/synoterm/ (or DSM → main menu → Terminal)."
+  echo "      Type your DSM account, then the password at the prompt in the terminal."
+else
+  echo "done. Open DSM → main menu → Terminal."
+fi
 echo "Log:        /var/packages/synoterm/var/runtime/synoterm.log"
 echo "Undo:       ${PKG_DIR}/contrib/uninstall-nginx-mount.sh"

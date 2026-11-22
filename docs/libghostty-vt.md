@@ -69,7 +69,7 @@ So the user-facing suggestion "use libghostty for PTY maintaining" splits into:
 
 | Job | Where it lives in synoterm |
 | --- | --- |
-| open `/dev/ptmx`, `fork`, `setsid`, `TIOCSCTTY`, `TIOCSWINSZ`, `setuid` | `src/session.zig` (already written, no dependency) |
+| open `/dev/ptmx`, `fork`, `setsid`, `TIOCSCTTY`, `TIOCSWINSZ`, `setuid` (dsm mode) | `src/session.zig` (already written, no dependency) |
 | track cursor/grid/scrollback/modes, reflow on resize, replay a screen | `libghostty-vt` (only for `--persist`) |
 | render pixels | xterm.js in the browser (already written) |
 

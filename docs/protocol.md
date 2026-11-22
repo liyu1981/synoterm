@@ -15,10 +15,15 @@ own port) and empty in dev:
 A request outside the base path is refused with `404` — the process never
 silently serves a second, unprefixed endpoint space.
 
-* Transport: RFC 6455 over the DSM origin (`wss://nas:5001/synoterm/ws`).
-* No subprotocol is required, but clients **may** offer
-  `synoterm.syno-token.<base64url>`; the server echoes it when it uses the token
-  for DSM authentication.
+* Transport: RFC 6455 over the DSM origin (`wss://nas:5001/synoterm/ws`, or the
+  origin of a reverse-proxy rule such as `wss://nas:7171/ws`).
+* Authentication depends on the server's `--auth` mode, and only the upgrade
+  request carries it (a WebSocket has no request headers to spare):
+  * `ssh` (default): the account name travels as `?user=<account>`. The
+    terminal then *is* ssh's login prompt; no cookie or token is involved.
+  * `dsm`: no query parameter; the client **may** offer
+    `synoterm.syno-token.<base64url>`, and the server echoes the one it used.
+  * `dev`: an optional `?t=<secret>` / `synoterm.dev-token.<base64url>`.
 * Binary frames carry raw terminal bytes. Text frames carry JSON control
   messages. This split keeps the hot path (keystrokes/output) free of parsing.
 
@@ -59,7 +64,7 @@ fields are clamped to sane bounds.
 | --- | --- |
 | `ready` | after the PTY exists and the shell was exec'd |
 | `error` | PTY/exec failure, policy rejection, limit hit; the socket closes after it |
-| `exit` | the shell exited; `code` is the exit status (128+signal for signals) |
+| `exit` | the shell (or the ssh login) ended; `code` is the exit status (128+signal for signals, ssh uses 255 for a refused login, 0 for a deliberate exit) |
 | `session` | (M3) session metadata on attach/detach |
 | `snapshot` | (M3) the next binary frames are a VT replay, not live output |
 
@@ -84,15 +89,16 @@ the session moves to `detached` and stays alive until the idle GC removes it.
 ## 4. Handshake details
 
 ```
-GET /synoterm/ws HTTP/1.1
+GET /synoterm/ws?user=alice HTTP/1.1        # ssh mode (default)
+GET /synoterm/ws HTTP/1.1                   # dsm mode
 Host: nas:5001
 Origin: https://nas:5001
 Upgrade: websocket
 Connection: Upgrade
 Sec-WebSocket-Key: <base64 16 bytes>
 Sec-WebSocket-Version: 13
-Sec-WebSocket-Protocol: synoterm.syno-token.<base64url>
-Cookie: id=<DSM session>
+Sec-WebSocket-Protocol: synoterm.syno-token.<base64url>   # dsm mode only
+Cookie: id=<DSM session>                                  # dsm mode only
 ```
 
 Response:
@@ -109,11 +115,12 @@ Rejection responses (plain HTTP, before the upgrade):
 
 | Status | Cause |
 | --- | --- |
-| 401 | no valid DSM session |
-| 403 | cross-origin, or account not in the required group |
+| 400 | ssh mode: no `?user=`, or a name that is not a plain account name |
+| 401 | dsm mode: no valid DSM session |
+| 403 | cross-origin, or (dsm) account not in the required group |
 | 404 | upgrade on a path other than the base path + `/ws` |
 | 429 | session limit reached |
-| 500 | `authenticate.cgi` failed / binary lacks the setuid privilege |
+| 500 | dsm mode: `authenticate.cgi` failed / binary lacks the setuid privilege |
 
 ## 5. Plain HTTP endpoints
 
@@ -121,9 +128,10 @@ All paths below are relative to the base path (`/synoterm` in the package).
 
 | Path | Purpose |
 | --- | --- |
-| `GET …/healthz` | `{"ok":true,"version":"…","api":n}` — reachability probe, no auth |
-| `GET …/status` | runs the **same** origin/auth/policy checks as the upgrade and returns `{"ok":true,"user":"…","sessions":n,"max_sessions":n}` or `{"ok":false,"code":401,"reason":"…"}` |
-| `OPTIONS …/status` | CORS preflight for the cross-port case; allows `X-Syno-Token` |
+| `GET …/healthz` | `{"ok":true,"version":"…","api":n,"auth":"ssh\|dsm\|dev"}` — reachability probe, no auth. The UI reads `auth` to decide whether to ask for an account or scrape a token |
+| `GET …/config.js` | `window.SYNOTERM_CONFIG = { proxy, port, auth, version }`, generated from the server's own flags so one bundle works at any prefix/port |
+| `GET …/status` | runs the **same** origin/auth/policy checks as the upgrade and returns `{"ok":true,"user":"…","sessions":n,"max_sessions":n,"auth":"…"}` or `{"ok":false,"code":401,"reason":"…"}`. In ssh mode there is nothing to verify, so it answers 200 with the requested account (or an empty one) |
+| `OPTIONS …/status` | CORS preflight for the cross-port case; allows `X-Syno-Token` (dsm) |
 
 `…/status` exists because a browser cannot read the status code of a failed
 WebSocket handshake: when a connection drops, the UI fetches it and shows the
@@ -131,8 +139,9 @@ reason ("test token missing or stale — reload the URL printed by nas-test.sh",
 "no DSM session", "this account is not allowed…") instead of an endless
 `disconnected, retrying in 1s…` loop.
 
-The DSM CSRF token can travel two ways, because a WebSocket cannot carry request
-headers and a `fetch()` cannot set `Sec-WebSocket-Protocol`:
+In **dsm mode** the DSM CSRF token can travel two ways, because a WebSocket
+cannot carry request headers and a `fetch()` cannot set
+`Sec-WebSocket-Protocol`:
 
 | Request | Token channel |
 | --- | --- |
@@ -140,6 +149,8 @@ headers and a `fetch()` cannot set `Sec-WebSocket-Protocol`:
 | `…/status` (`fetch`) | `X-Syno-Token: <raw>[,<raw>…]` (preflighted when cross-port) |
 
 A DSM page does not tell JavaScript which string is the session's SynoToken —
+(in ssh mode none of this applies: the account name is the only credential
+material in the upgrade, and the password never leaves the pty)
 the desktop URL, a global, a cookie and the page HTML have all carried it — so
 the UI sends **every candidate it found (up to 8), best first**, and the server
 tries them in order: the first one `authenticate.cgi` accepts wins. The refusal

@@ -10,7 +10,11 @@
  *   ws=<path>       the nginx proxy mount point (see packaging/dsm7/nginx)
  *   SynoToken=<...> DSM's CSRF token, appended by DSM to this script's own
  *                   src; forwarded so the backend can authenticate the
- *                   desktop session through authenticate.cgi.
+ *                   desktop session through authenticate.cgi. Only AUTH="dsm"
+ *                   uses it — in the default ssh mode the iframe asks for the
+ *                   account and the password is typed into the terminal. The
+ *                   `ws=` path is likewise the dsm/contrib mount, so keep
+ *                   BASE_PATH=/synoterm if you use this desktop entry.
  */
 (function registerSynotermApplication() {
   "use strict";

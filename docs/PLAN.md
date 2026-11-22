@@ -181,11 +181,13 @@ Details and file contents: [dsm-integration.md](dsm-integration.md).
    (`SYNO.SDS.App.Synoterm.Instance`) with `type: "app"`, `appWindow`, and the
    class is built from `SYNO.namespace` + `Vue.extend` +
    `<v-app-instance>`/`<v-app-window>`.
-5. **Session identity.** `/usr/syno/synoman/webman/modules/authenticate.cgi`
-   prints the authenticated account when invoked with the browser's cookie and
-   `HTTP_X_SYNO_TOKEN`; DSM appends `?SynoToken=…` to third-party app script
-   URLs, and browsers cannot set headers on a WebSocket, so the token travels
-   as the `Sec-WebSocket-Protocol` value (RFC 6455 subprotocol).
+5. **Session identity.** Two modes now. `AUTH="ssh"` (the default since
+   0.2.0, D2): the terminal runs `ssh -l <account> 127.0.0.1` and sshd asks for
+   the password in the terminal — no DSM API at all. `AUTH="dsm"` (the original
+   plan): `authenticate.cgi` prints the authenticated account when invoked with
+   the browser's cookie and `HTTP_X_SYNO_TOKEN`; DSM appends `?SynoToken=…` to
+   third-party app script URLs, and browsers cannot set headers on a WebSocket,
+   so the token travels as the `Sec-WebSocket-Protocol` value.
 6. **Group checks** must use DSM's `id -Gn <user>` (NSS), because a statically
    linked binary only sees `/etc/passwd` and `/etc/group`.
 
@@ -195,28 +197,29 @@ Details and file contents: [dsm-integration.md](dsm-integration.md).
 | --- | --- | --- | --- |
 | D1 | Zig over Go/Node | single static binary per arch, no runtime, cross-compiles with `zig build -Dtarget=…`, direct PTY control | high |
 | D2 | ~~No SSH in the default path~~ — reversed: ssh is now the default auth | no DSM token scraping, no setuid binary; costs an enabled SSH service and a prompt per browser session | — (see docs/history.md) |
-| D3 | Setuid `tool` for one binary | only way to fork a PTY as another user while the package itself is unprivileged; DSM-sanctioned mechanism | medium |
+| D3 | Setuid `tool` for one binary (dsm mode only, `SYNOTERM_SETUID=1`) | only way to fork a PTY as another user while the package itself is unprivileged; DSM-sanctioned mechanism | medium |
 | D4 | xterm.js, not a server-rendered terminal | best emulation/UX, tiny integration surface, offline bundle | low |
 | D5 | iframe isolation for the UI | DSM's Vue/ExtJS globals, CSS resets and upgrade leftovers cannot break xterm; wrapper stays ~60 lines of ES5 | low |
 | D6 | Hand-rolled HTTP + WebSocket | ~600 lines, no dependency churn; Zig 0.17 removed `std.ArrayList.init`, `std.Thread.Mutex`, `dupeZ`, `**`, `@cImport` — fewer deps means fewer breakages | low (swap for `http.zig` later if needed) |
 | D7 | Raw syscalls + libc `extern`s in `sys.zig` | isolates the entire OS/toolchain surface in one file; `std.Io` is still moving | none (by design) |
 | D8 | Static musl, per-arch SPKs | runs on any DSM 7.1+ regardless of glibc; no toolchain on the NAS | low |
 | D9 | `libghostty-vt` for server-side VT state (M3) | correct reflow/scrollback/reattach without reimplementing a VT parser; MIT, Zig-native, needs exactly the Zig version we use | medium (fallback: raw ring buffer) |
-| D10 | Admin-only by default (`allUsers: false`, group `administrators`) | a terminal is root-adjacent; opt-in for other users later | none |
+| D10 | Admin-only by default (`allUsers: false`, group `administrators`; in ssh mode the policy is sshd's) | a terminal is root-adjacent; opt-in for other users later | none |
 | D11 | Default to the documented `.url` desktop registration (7.1-safe); Vue wrapper only with `SYNOTERM_UI_STYLE=vue` | 7.1 is the target floor and the `.url` form is documented for 7.x; the Vue `<v-app-window>` path is only proven on 7.2 | low (config + one JS file) |
 | D12 | Sessions die with the WebSocket (no detach, no server-side VT) | simplest, safest, matches "terminal = a window you close"; removes the biggest dependency from v1 | medium (M5 adds `--persist`) |
-| D13 | Local DSM accounts only; non-admin and domain accounts refused | avoids an unverifiable NSS path and keeps the privileged surface small | low |
+| D13 | Local DSM accounts only in dsm mode; non-admin and domain accounts refused there (ssh mode delegates to PAM/NSS) | avoids an unverifiable NSS path and keeps the privileged surface small | low |
 
 ## 5. Risk register
 
 | Risk | Impact | Likelihood | Mitigation |
 | --- | --- | --- | --- |
 | Zig 0.17 is a moving target (APIs already removed: `std.Io` rework, `@cImport`, `std.Thread.Mutex`, `ArrayList.init`) | build breaks on toolchain bump | high | pin `.zigversion`; all churn confined to `sys.zig`/`util.zig`; CI pins the toolchain |
-| `authenticate.cgi` behaviour differs across 7.1/7.2, or ignores `X-Syno-Token` | auth fails or is CSRF-weak | medium | M1 verification matrix; fallback to `SYNO.API.Auth` session check against `127.0.0.1:5000`; M4 requires the token |
+| `authenticate.cgi` behaviour differs across 7.1/7.2, or ignores `X-Syno-Token` (dsm mode only) | auth fails or is CSRF-weak | medium | superseded for new installs by the ssh default (D2); dsm remains opt-in | M1 verification matrix; fallback to `SYNO.API.Auth` session check against `127.0.0.1:5000`; M4 requires the token |
 | 7.1 vs 7.2 desktop registration differs | app does not open, or opens without a `SynoToken` | medium | default to the documented `.url` form (D11); Vue wrapper is a build option; token discovery in the UI falls back to the same-origin parent frame and the token cookie |
-| `authenticate.cgi` needs the token, and `.url` style cannot inject one | 401 on 7.1 | medium | cookie-only path is implemented; M1 verifies it; fallback = Vue/ExtJS wrapper that receives `?SynoToken=` |
+| `authenticate.cgi` needs the token, and `.url` style cannot inject one (dsm mode only) | 401 on 7.1 | medium | cookie-only path is implemented; M1 verifies it; fallback = Vue/ExtJS wrapper that receives `?SynoToken=` |
 | nginx `web-config` disabled by a DSM update | no WebSocket path | low | server serves the UI itself on the loopback port; document manual reverse-proxy setup as escape hatch |
 | Setuid helper compromised via a parsing bug | full root on the NAS | medium | tiny privileged surface, no shell invocation, fixed-format handshake, no env trust, M4 split; audit |
+| SSH service disabled, or DSM auto-block blocks `127.0.0.1` after failed logins (ssh mode) | no terminal, and even the correct password is refused | medium | diagnose.sh reports AUTH, the ssh client and sshd on :22; docs tell the user to enable SSH and to keep auto-block sane; `AUTH="dsm"` is the escape hatch |
 | `libghostty-vt` needs a newer Zig / fails on musl-aarch64 | future `--persist` blocked | low (deferred) | not on the v1 critical path (D12); spike before committing to `--persist` |
 | WebSocket hijacking (no CORS on WS) | session theft | medium | same-origin check on `Origin` vs `Host`; DSM token subprotocol; loopback-only bind |
 | Orphaned shells / fd leaks | resource exhaustion | medium | one session per socket, SIGHUP to the process group, `waitpid`, bounded sessions, GC in M3 |

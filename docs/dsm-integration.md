@@ -422,13 +422,27 @@ iframe `src` (and the `url` registration) must be absolute —
 
 ## 6. Authentication: who is calling?
 
-The backend must not trust the network path. Two layers:
+The backend must not trust the network path. Every mode has the same first
+layer:
 
 1. **Same-origin check** — `Origin` must equal `Host` on the WebSocket upgrade
-   (browsers do not apply CORS to WebSockets, so this is required).
-2. **DSM session check** — run
-   `/usr/syno/synoman/webman/modules/authenticate.cgi` with a CGI environment
-   that mirrors the browser request:
+   (browsers do not apply CORS to WebSockets, so this is required). DSM's
+   reverse proxy forwards the browser's `Host`; the contrib snippet sets
+   `proxy_set_header Host $http_host;` for the same reason.
+
+Then one of:
+
+* **`AUTH="ssh"` (default)** — nothing else. The account name arrives as
+  `?user=`, is validated, and becomes `ssh -l <account>`; sshd authenticates in
+  the terminal. There is no DSM cookie, token or CGI in this path (§4.3b).
+* **`AUTH="dsm"`** — a DSM session check, below. Kept for installs that would
+  rather not enable SSH; it is what the rest of this section (and §4.1b)
+  describes.
+
+### 6.1 dsm mode: replaying the browser session
+
+Run `/usr/syno/synoman/webman/modules/authenticate.cgi` with a CGI environment
+that mirrors the browser request:
 
 ```
 REQUEST_METHOD=GET
@@ -441,18 +455,19 @@ REMOTE_ADDR=<peer address>
 ```
 
 `authenticate.cgi` prints the authenticated account name (empty on failure).
-With the default `.url` UI style no `SynoToken` is available, so the request is
-sent with the cookie only (`HTTP_X_SYNO_TOKEN=`); the server treats an empty
-result as "not authenticated" and returns 401.
+DSM 7.1 needs the cookie **and** the SynoToken; when no token was found the
+request goes out with the cookie only and DSM refuses it (`exit 7`, empty
+output) — that is one of the failure modes ssh mode does not have.
 
-Policy in v1 (decided):
+Policy in dsm mode (v1):
 
 * **administrators only** — `require_group = "administrators"`, `allUsers: false`;
 * **local DSM accounts only** — the account must exist in `/etc/passwd`
   (AD/LDAP accounts get an explicit 403 instead of a half-working shell);
 * **no token, no session** — the WebSocket upgrade must carry a valid DSM
   session cookie; a bare `127.0.0.1` request from another local process is
-  rejected because it has no cookie.
+  rejected because it has no cookie. (In ssh mode the equivalent guard is that
+  sshd still wants a password, so a bare upgrade buys nothing.)
 
 Then check group membership with DSM's own tooling:
 
@@ -485,15 +500,24 @@ session validation over `http://127.0.0.1:5000` using the `id` cookie.
 
 ```sh
 HOME="${SYNOPKG_PKGVAR}/home" nohup "${SYNOPKG_PKGDEST}/bin/synoterm" \
-  --listen 7381 --auth dsm --base-path /synoterm \
+  --listen 7381 --bind 127.0.0.1 \
+  --auth "${AUTH}" --base-path "${BASE_PATH}" \
   --web-root "${SYNOPKG_PKGDEST}/ui/web" \
+  --max-sessions "${MAX_SESSIONS}" \
+  [--require-group "${REQUIRE_GROUP}"]          # AUTH=dsm only
+  [--ssh-host 127.0.0.1 --ssh-port 22 \
+   --ssh-control-persist "${SSH_CONTROL_PERSIST}"]   # AUTH=ssh only
   >>"${SYNOPKG_PKGVAR}/runtime/synoterm.log" 2>&1 &
 ```
 
+The values come from `$SYNOPKG_PKGVAR/etc/synoterm.conf` (`AUTH` defaults to
+`ssh`); `BIND="auto"` resolves to `127.0.0.1` in ssh mode and, in dsm mode,
+whenever a contrib snippet is installed.
+
 * `status` must exit `0` when running and `3` when stopped (DSM convention).
 * The pid file lives in `$SYNOPKG_PKGVAR/runtime` (writable).
-* `postinst` creates `$SYNOPKG_PKGVAR/home` (the package user's `HOME`) and
-  `runtime`, both `0700`.
+* `postinst` creates `$SYNOPKG_PKGVAR/home`, `home/.ssh` (ssh known_hosts and
+  the ControlMaster socket) and `runtime`, all `0700`.
 * `stop` sends SIGTERM, waits up to 20 s, then SIGKILL.
 * All scripts are `0755` and start with `#!/bin/sh` (DSM 7's `/bin/sh` is bash
   in POSIX mode; busybox-isms are avoided).
@@ -543,17 +567,22 @@ Uninstalling has the same worker restriction on some builds — use
 [ ] spk installs on DSM 7.1; Package Center shows "Terminal" with the icon
 [ ] menu icon opens the terminal (url style, default build)
 [ ] ui/web assets load from /webman/3rdparty/synoterm/web/
-[ ] ui/web/config.js carries `proxy: "/synoterm"`, `port`, `httpsPort`
+[ ] ui/web/config.js carries `proxy`, `port`, `auth` (the binary regenerates it)
 [ ] /synoterm/ws upgrades (browser devtools: 101 Switching Protocols)
-[ ] `X-Syno-Token` + cookie make authenticate.cgi return the account (`/synoterm/status` 200)
-[ ] if not: SYNOTERM_UI_STYLE=vue build works (DSM 7.2) and carries the token
-[ ] ls -l /var/packages/synoterm/target/bin/synoterm  → -rwsr-x--- root package
+[ ] ssh mode: the terminal asks for the password and logs in; `id -un` is the account
+[ ] ssh mode: a second tab does not ask again (ControlMaster) within 10 min
+[ ] dsm mode: `X-Syno-Token` + cookie make authenticate.cgi return the account (`/synoterm/status` 200)
+[ ] dsm mode: ls -l /var/packages/synoterm/target/bin/synoterm → -rwsr-x--- root package
 [ ] inside terminal: id / whoami / pwd / echo $HOME are the DSM user
 [ ] resize the DSM window → xterm reflows, `stty size` matches
 [ ] stop package → shells receive SIGHUP; start → works again
-[ ] non-admin account: icon hidden and WS rejected with 403
-[ ] domain/LDAP account: rejected with 403, no shell spawned
-[ ] upgrade 0.1.0 → 0.2.0 keeps config, restarts nginx mount
+[ ] dsm mode, non-admin account: icon hidden and WS rejected with 403
+[ ] ssh mode: sshd's own policy decides (`AllowGroups`, "non-admin SSH"); a
+    refused login leaves the terminal at "Permission denied" and reconnects
+[ ] upgrade 0.1.0 → 0.2.0 keeps the existing synoterm.conf (no AUTH= line →
+    the new default, ssh, takes effect), restarts the service
+[ ] upgrade with AUTH="dsm": build with SYNOTERM_SETUID=1, otherwise the WS
+    answers 500 "lacks the setuid tool privilege"
 [ ] uninstall removes /var/packages/synoterm and the nginx snippet
 [ ] no terminal traffic in /var/log/nginx/access.log
 ```
