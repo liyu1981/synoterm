@@ -8,6 +8,7 @@
 //   $SYNOTERM_CHROMIUM, playwright's cache, system chromium/chrome.
 import { spawn } from "node:child_process";
 import { connect } from "node:net";
+import { createServer } from "node:http";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -377,7 +378,9 @@ try {
   const fakeSsh = join(sshRoot, "fake-ssh");
   writeFileSync(
     fakeSsh,
-    '#!/bin/sh\necho "FAKE-SSH $*"\necho "shell up"\nsleep 2\nexit 0\n',
+    // One argument per line: a long single line would be wrapped by the pty
+    // and split mid-token, which makes matching the argv in xterm unreliable.
+    '#!/bin/sh\necho "FAKE-SSH"\nfor a in "$@"; do echo "ARG $a"; done\necho "shell up"\nsleep 2\nexit 0\n',
     { mode: 0o755 },
   );
   const sshHome = join(sshRoot, "home");
@@ -441,9 +444,11 @@ try {
   const sshScreen = await sshPage.evaluate(
     () => document.querySelector(".terminal-pane.active .xterm-rows")?.innerText || "",
   );
-  if (!sshScreen.includes("FAKE-SSH")) failures.push("ssh mode did not run the ssh binary");
-  if (!sshScreen.includes("-l alice")) failures.push(`ssh argv lacked the account: ${sshScreen.slice(0, 160)}`);
-  if (!sshScreen.includes("known_hosts")) failures.push("ssh argv has no UserKnownHostsFile");
+  const sshArgv = sshScreen.replace(/\s+/g, " ");
+  if (!sshArgv.includes("FAKE-SSH")) failures.push("ssh mode did not run the ssh binary");
+  if (!sshArgv.includes("ARG -l ARG alice")) failures.push(`ssh argv lacked the account: ${sshArgv.slice(0, 200)}`);
+  if (!/ARG \S*known_hosts/.test(sshArgv)) failures.push("ssh argv has no UserKnownHostsFile");
+  if (!sshArgv.includes("ARG IdentityFile=none")) failures.push("ssh argv still probes identity files");
   // At the root the UI must stay on its own origin (the reverse proxy), not
   // fall back to the package's :7381 port — that fallback is in another
   // security context and would be refused by the same-origin check there.
@@ -466,6 +471,79 @@ try {
   if (!settled.startsWith("closed")) failures.push(`exited ssh session did not stay closed: "${settled}"`);
   await sshContext.close();
   rmSync(sshRoot, { recursive: true, force: true });
+
+  // ---- DSM-served page with no mount: it must use the reverse proxy ---------
+  // The DSM desktop window is an iframe on :5001/webman/3rdparty/synoterm/web/,
+  // and the hand-applied /synoterm mount there is wiped whenever DSM rebuilds
+  // /etc/nginx (every package install/upgrade). A page with no ingress of its
+  // own must then follow `proxyOrigin`/`proxyPort` from config.js instead of
+  // falling back to the package port and failing.
+  const dsmPort = Number(PORT) + 3;
+  const dsmTargetPort = String(Number(PORT) + 4);
+  const dsmRoot = mkdtempSync(join(tmpdir(), "synoterm-e2e-dsm-"));
+  cpSync(join(root, "frontend", "dist"), dsmRoot, { recursive: true });
+  writeFileSync(
+    join(dsmRoot, "config.js"),
+    `window.SYNOTERM_CONFIG = { proxy: "/synoterm", port: 0, httpsPort: 0, proxyPort: 0, ` +
+      `proxyOrigin: "http://127.0.0.1:${dsmTargetPort}" };\n`,
+  );
+  // The "reverse proxy": a separate prefixed server, started for this check.
+  const dsmTargetRoot = mkdtempSync(join(tmpdir(), "synoterm-e2e-proxy-"));
+  cpSync(join(root, "frontend", "dist"), dsmTargetRoot, { recursive: true });
+  const dsmTarget = spawn(
+    binary,
+    ["--listen", dsmTargetPort, "--auth", "dev", "--web-root", dsmTargetRoot, "--base-path", "/synoterm"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  extraServers.push(dsmTarget);
+  const dsmTargetUp = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 5000);
+    dsmTarget.stderr.on("data", (chunk) => {
+      if (String(chunk).includes("listening")) {
+        clearTimeout(timer);
+        resolve(true);
+      }
+    });
+  });
+  if (!dsmTargetUp) failures.push("the simulated reverse-proxy backend did not start");
+  const staticServer = createServer((req, res) => {
+    const name = (req.url || "/").split("?")[0];
+    const file = join(dsmRoot, name === "/" ? "index.html" : name);
+    try {
+      const body = readFileSync(file);
+      res.writeHead(200, { "Content-Type": name.endsWith(".js") ? "text/javascript" : "text/html" });
+      res.end(body);
+    } catch {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Not found\n"); // a DSM vhost without the mount
+    }
+  });
+  await new Promise((resolve) => staticServer.listen(dsmPort, "127.0.0.1", resolve));
+
+  const dsmContext = await browser.newContext();
+  const dsmPage = await dsmContext.newPage();
+  dsmPage.on("pageerror", (error) => failures.push(`pageerror (dsm page): ${error}`));
+  await dsmPage.goto(`http://127.0.0.1:${dsmPort}/`, { waitUntil: "load" });
+  await dsmPage.waitForFunction(
+    () => document.querySelector("#status-text")?.textContent?.startsWith("connected"),
+    null,
+    { timeout: 8000 },
+  );
+  const followed = await dsmPage.evaluate(() => window.synotermBackend);
+  if (followed?.origin !== `http://127.0.0.1:${dsmTargetPort}` || followed?.mode !== "proxy-rule") {
+    failures.push(`page without an ingress did not follow proxyOrigin: ${JSON.stringify(followed)}`);
+  }
+  await dsmPage.keyboard.type("echo NO_MOUNT_OK\n");
+  await dsmPage.waitForTimeout(900);
+  const dsmScreen = await dsmPage.evaluate(
+    () => document.querySelector(".terminal-pane.active .xterm-rows")?.innerText || "",
+  );
+  if (!dsmScreen.includes("NO_MOUNT_OK")) failures.push("the proxied backend did not answer on the DSM-like page");
+  await dsmContext.close();
+  await new Promise((resolve) => staticServer.close(resolve));
+  dsmTarget.kill();
+  rmSync(dsmRoot, { recursive: true, force: true });
+  rmSync(dsmTargetRoot, { recursive: true, force: true });
 } catch (error) {
   failures.push(String(error));
 } finally {

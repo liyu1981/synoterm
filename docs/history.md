@@ -48,6 +48,7 @@ This document collects background that used to live in the README.
 | SSH login mode (`ssh -l <account> 127.0.0.1`, no setuid) | implemented, unit + e2e tested |
 | DSM session mode (`authenticate.cgi` + group check) | working on DSM 7.1.1; fragile across builds (see above) |
 | Reverse-proxy deployment (own port, `BASE_PATH=""`) | implemented, documented in dsm-integration §4.3 |
+| DSM window survives nginx regeneration (`PROXY_HTTPS_PORT`) | implemented, e2e tested (dsm-integration §4.3a) |
 | Multi-arch SPK build (`tools/build-spk.sh`) | working (x86_64 verified, armv8/armv7 cross-compiled) |
 | v1 policy: DSM 7.1 floor, admins only, local accounts only, kill on disconnect | implemented |
 | Service config (`$SYNOPKG_PKGVAR/etc/synoterm.conf`) | implemented |

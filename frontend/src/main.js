@@ -148,10 +148,14 @@ function authMode() {
   return typeof configured === "string" && configured.length > 0 ? configured : "dsm";
 }
 
-async function healthzInfo(origin, credentials) {
+async function healthzInfo(origin) {
   try {
+    // "same-origin" on purpose: the probe crosses ports (DSM's vhost, the
+    // reverse-proxy rule), and a *credentialed* cross-origin response would
+    // require Access-Control-Allow-Credentials, which /healthz does not send
+    // (it is unauthenticated and needs no cookie).
     const response = await fetch(`${origin}${apiPrefix()}/healthz`, {
-      credentials,
+      credentials: "same-origin",
       cache: "no-store",
     });
     if (!response.ok) return null;
@@ -165,14 +169,21 @@ async function healthzInfo(origin, credentials) {
 /**
  * Picks the backend origin once, then caches it.
  *
- * The package can be reached two ways:
- *   1. same-origin through DSM's nginx mount (/synoterm/), applied by hand with
- *      contrib/install-nginx-mount.sh  — preferred: cookies, HTTPS, no extra port
- *   2. directly on the package's own port (http://nas:7381/) — works without any
- *      DSM configuration, but the page must come from DSM (or the same host)
+ * The app HTML can be served by DSM (`/webman/3rdparty/synoterm/web/`) while the
+ * backend is reachable somewhere else on the same host. In order of preference:
  *
- * A cheap probe of <origin>/synoterm/healthz decides which is available; the
- * result is only a transport choice, authentication is unchanged either way.
+ *   1. the origin that served the page — the hand-applied nginx mount at
+ *      `/synoterm/` (contrib/install-nginx-mount.sh), or with an empty prefix a
+ *      reverse-proxy rule that maps the site root onto the backend;
+ *   2. DSM's own HTTPS vhost, when the page came over plain HTTP;
+ *   3. the DSM **reverse-proxy** rule on its own port (`proxyPort` in config.js)
+ *      or an absolute origin (`proxyOrigin`) — the durable one: DSM keeps that
+ *      rule in its own config, while `/etc/nginx/conf.d` is wiped whenever DSM
+ *      regenerates nginx (which every package install/upgrade does);
+ *   4. the package's own port, for dev/LAN use.
+ *
+ * A cheap probe of `<origin>/<prefix>/healthz` decides; the result is only a
+ * transport choice, authentication is unchanged either way.
  */
 async function resolveBackend() {
   if (backend) {
@@ -181,10 +192,11 @@ async function resolveBackend() {
   }
   const config = apiConfig();
   const prefix = apiPrefix();
+  const samePort = (port) => String(port) === window.location.port;
 
   // Already talking to our own server? Then stay on this origin.
-  if (Number.isFinite(config.port) && String(config.port) === window.location.port) {
-    serverInfo = await healthzInfo(window.location.origin, "same-origin");
+  if (Number.isFinite(config.port) && samePort(config.port)) {
+    serverInfo = await healthzInfo(window.location.origin);
     return chooseBackend(window.location.origin, "direct");
   }
 
@@ -195,35 +207,50 @@ async function resolveBackend() {
   // 1. the origin that served this page: the nginx mount at /synoterm, or —
   //    with an empty prefix — a reverse proxy that maps the site root straight
   //    onto the backend.
-  serverInfo = await healthzInfo(window.location.origin, "same-origin");
+  serverInfo = await healthzInfo(window.location.origin);
   if (serverInfo) {
     return chooseBackend(window.location.origin, prefix ? "proxy" : "same-origin");
   }
 
-  // 2. the same mount on DSM's HTTPS vhost. DSM is often opened on :5000 while
-  //    the mount only exists on the HTTPS server block; the paths are identical,
-  //    so the terminal can still use it — but cookies may not travel from an
-  //    http page, hence the hint below.
+  // 2./3. other ingress points on this host, best first. The paths are the same
+  // everywhere, so only the origin changes.
+  const candidates = [];
+  const addCandidate = (origin, mode) => {
+    if (typeof origin !== "string" || origin.length === 0) return;
+    if (origin === window.location.origin) return;
+    if (candidates.some((c) => c.origin === origin)) return;
+    candidates.push({ origin, mode });
+  };
+
+  const configuredOrigin = config.proxyOrigin;
+  if (prefix && typeof configuredOrigin === "string" && /^https?:\/\//.test(configuredOrigin)) {
+    addCandidate(configuredOrigin.replace(/\/+$/, ""), "proxy-rule");
+  }
   const httpsPort = Number.isFinite(config.httpsPort) ? config.httpsPort : 5001;
-  if (prefix && window.location.protocol === "http:" && String(httpsPort) !== window.location.port) {
-    const origin = `https://${window.location.hostname}:${httpsPort}`;
-    serverInfo = await healthzInfo(origin, "include");
-    if (serverInfo) {
-      console.warn(
-        `synoterm: DSM is open over HTTP but the mount lives on ${origin} — ` +
-          `reopen DSM at ${origin}/ for session cookies to be sent`,
-      );
-      return chooseBackend(origin, "proxy-https");
-    }
+  if (prefix && httpsPort > 0 && !samePort(httpsPort)) {
+    addCandidate(`https://${window.location.hostname}:${httpsPort}`, "proxy-https");
+  }
+  const proxyPort = Number(config.proxyPort);
+  if (prefix && Number.isFinite(proxyPort) && proxyPort > 0 && !samePort(proxyPort)) {
+    addCandidate(`https://${window.location.hostname}:${proxyPort}`, "proxy-rule");
   }
 
-  // 3. no mount anywhere: talk to the package's own port.
+  for (const candidate of candidates) {
+    serverInfo = await healthzInfo(candidate.origin);
+    if (!serverInfo) continue;
+    console.info(
+      `synoterm: no ${prefix || "/"} on ${window.location.origin} — using ${candidate.origin}`,
+    );
+    return chooseBackend(candidate.origin, candidate.mode);
+  }
+
+  // 4. no ingress anywhere: talk to the package's own port (dev/LAN).
   if (Number.isFinite(config.port) && config.port > 0) {
     const origin = `${window.location.protocol}//${window.location.hostname}:${config.port}`;
-    serverInfo = await healthzInfo(origin, "include");
+    serverInfo = await healthzInfo(origin);
     return chooseBackend(origin, "direct");
   }
-  serverInfo = await healthzInfo(window.location.origin, "same-origin");
+  serverInfo = await healthzInfo(window.location.origin);
   return chooseBackend(window.location.origin, "same-origin");
 }
 
@@ -245,6 +272,23 @@ function wsUrl() {
 /** HTTP API path for control endpoints (healthz, status), e.g. /synoterm/status. */
 function apiPath(name) {
   return `${backendBase()}/${name}`;
+}
+
+/**
+ * Why nothing answered, in terms the user can act on. A page served by DSM has
+ * no backend of its own: it needs either the hand-applied mount at `/<prefix>/`
+ * or the reverse-proxy rule — and DSM deletes the mount file whenever it
+ * rebuilds nginx (every package install/upgrade does).
+ */
+function ingressHint() {
+  const config = apiConfig();
+  const prefix = apiPrefix();
+  if (!prefix) return "";
+  if (Number.isFinite(config.port) && String(config.port) === window.location.port) return "";
+  return (
+    `this origin has no ${prefix}/ — re-run contrib/install-nginx-mount.sh, ` +
+    `or set PROXY_HTTPS_PORT to the reverse-proxy port in synoterm.conf`
+  );
 }
 
 /**
@@ -871,8 +915,15 @@ class Session {
       );
       this.manager.setNotice(`disconnected — retrying (${this.attempts})`, true);
     } catch {
-      this.term.write("\r\n\x1b[33mdisconnected; server not reachable — retrying…\x1b[0m\r\n");
-      this.manager.setNotice("server not reachable — retrying", true);
+      const hint = ingressHint();
+      if (hint) {
+        const message = `disconnected; no backend reachable — ${hint}`;
+        this.term.write(`\r\n\x1b[33m${message}\x1b[0m\r\n`);
+        this.manager.setNotice("no backend reachable — see the terminal", true);
+      } else {
+        this.term.write("\r\n\x1b[33mdisconnected; server not reachable — retrying…\x1b[0m\r\n");
+        this.manager.setNotice("server not reachable — retrying", true);
+      }
     }
   }
 

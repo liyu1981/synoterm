@@ -71,8 +71,19 @@ and 7.2+ as primary target; signed packages.
 
 4. **Optional: keep the DSM desktop entry.** *DSM → main menu → Terminal* opens
    the same UI in a DSM window (an iframe around
-   `/webman/3rdparty/synoterm/web/`). It shares `/synoterm/` with the reverse
-   proxy, so keep `BASE_PATH="/synoterm"` if you use it.
+   `/webman/3rdparty/synoterm/web/`). That page has no backend of its own, so
+   point it at the rule from step 3 — otherwise it falls back to the
+   loopback-only `:7381` and says "server not reachable":
+
+   ```sh
+   sed -i 's/^PROXY_HTTPS_PORT=.*/PROXY_HTTPS_PORT="7171"/' \
+     /var/packages/synoterm/var/etc/synoterm.conf
+   synopkg restart synoterm
+   ```
+
+   This survives DSM and package upgrades; the `/etc/nginx/conf.d` mount from the
+   contrib helper does not (DSM rebuilds that directory whenever a package is
+   installed). Keep `BASE_PATH="/synoterm"` either way.
 
 **Authentication modes** (`AUTH=` in
 `/var/packages/synoterm/var/etc/synoterm.conf`):

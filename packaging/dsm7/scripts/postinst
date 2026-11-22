@@ -43,6 +43,14 @@ BIND="auto"
 # (https://nas:7171/); the packaged DSM desktop entry expects /synoterm.
 BASE_PATH="/synoterm"
 #
+# Port of the DSM reverse-proxy rule that fronts this backend (Login Portal ->
+# Advanced -> Reverse Proxy), e.g. 7171. DSM serves the desktop window from
+# :5001, where the hand-applied /synoterm mount disappears every time DSM
+# rebuilds /etc/nginx (each package install/upgrade does); with this set, the
+# window probes the proxy instead of falling back to a dead :7381.
+# Empty = do not probe (the window then needs the contrib mount).
+PROXY_HTTPS_PORT=""
+#
 # ssh mode: the login target. Always this NAS, so DSM's own sshd authenticates.
 SSH_HOST="127.0.0.1"
 SSH_PORT="22"

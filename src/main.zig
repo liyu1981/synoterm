@@ -17,7 +17,7 @@ const max_static_bytes: usize = 32 * 1024 * 1024;
 
 /// Bumped whenever the HTTP/WS surface changes, so an old binary that is still
 /// running can be recognised (the UI reports it when /status is missing).
-const server_version = "0.2.1";
+const server_version = "0.2.2";
 const api_version: u32 = 5;
 
 pub const AuthMode = enum { dev, dsm, ssh };
@@ -961,6 +961,17 @@ fn sshArgs(allocator: std.mem.Allocator, cfg: Config, user: []const u8) ![]const
     const home = std.mem.trimEnd(u8, cfg.home, "/");
 
     try literal.add(&list, allocator, "-tt");
+    // `IdentityFile=none` is what silences ssh's default identity list. On
+    // OpenSSH 8.2 (DSM 7.1) the client builds that list from the *service*
+    // user's passwd home before authentication options are consulted, so the
+    // root-owned /var/packages/<pkg>/home/.ssh produces two
+    //   load pubkey "…/id_rsa": Permission denied
+    // lines per key type on the terminal. `PubkeyAuthentication=no` and
+    // `IdentitiesOnly=yes` do NOT stop that (measured on 8.2p1); IdentityFile
+    // =none does. A client key could not help anyway — it would have to be
+    // authorised in the target account's authorized_keys.
+    try literal.option(&list, allocator, "IdentityFile=none");
+    try literal.option(&list, allocator, "PubkeyAuthentication=no");
     try literal.option(&list, allocator, "StrictHostKeyChecking=accept-new");
     try literal.add(&list, allocator, "-o");
     try list.append(try util.allocPrintZ(allocator, "UserKnownHostsFile={s}/.ssh/known_hosts", .{home}));
@@ -1308,6 +1319,17 @@ test "ssh argv is one option per entry and ends with user and host" {
     }
     try std.testing.expect(has_user);
     try std.testing.expect(!has_control); // disabled by ControlPersist=0
+    // No key probing: on OpenSSH 8.2 the default identity list is built before
+    // auth options apply, so only IdentityFile=none keeps the "load pubkey …:
+    // Permission denied" noise out of the terminal.
+    var no_keys = false;
+    var no_pubkey = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "IdentityFile=none")) no_keys = true;
+        if (std.mem.eql(u8, arg, "PubkeyAuthentication=no")) no_pubkey = true;
+    }
+    try std.testing.expect(no_keys);
+    try std.testing.expect(no_pubkey);
     try std.testing.expectEqualStrings("127.0.0.1", args[args.len - 1]);
     // The known_hosts file lives under the service HOME.
     var known = false;

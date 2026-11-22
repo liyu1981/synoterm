@@ -271,6 +271,54 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://127.0.0.1:7171/
 its own flags, so the bundle never has to be rebuilt for a different prefix or
 port (§4.1's `config.js` is only the fallback used by the DSM-served copy).
 
+### 4.3a Keeping the DSM desktop window working
+
+The desktop window (*main menu → Terminal*) is an iframe on DSM's own vhost:
+`https://nas:5001/webman/3rdparty/synoterm/web/`. It has no backend of its own, so
+it needs an ingress, and there are only two:
+
+* the hand-applied mount (`/etc/nginx/conf.d/dsm.synoterm.conf`), or
+* the reverse-proxy rule (§4.3).
+
+**`/etc/nginx/conf.d` is DSM-managed and gets rebuilt** — installing or upgrading
+a package is enough. The directory is a set of symlinks into
+`/usr/local/etc/nginx/conf.d-available/`, and a *regular* file dropped there by the
+contrib helper does not survive; the window then falls back to `:7381`, which is
+loopback-only, and shows `disconnected; server not reachable`.
+
+So the window is told where the durable ingress is. `start-stop-status` rewrites
+`ui/web/config.js` on every start (that file is what DSM serves, unlike the one
+the binary generates for itself):
+
+```js
+window.SYNOTERM_CONFIG = { proxy: "/synoterm", port: 7381, httpsPort: 5001, proxyPort: 7171 };
+```
+
+`resolveBackend()` probes, in order: the page's own origin → `proxyOrigin` if set
+→ `https://<host>:<httpsPort>` → `https://<host>:<proxyPort>` → the package port.
+The first origin whose `/<prefix>/healthz` answers wins, so the window keeps
+working across upgrades without the mount, and keeps using the mount when it is
+there.
+
+Enable it with the port of your rule:
+
+```sh
+conf=/var/packages/synoterm/var/etc/synoterm.conf
+sed -i 's/^PROXY_HTTPS_PORT=.*/PROXY_HTTPS_PORT="7171"/' "$conf"
+synopkg restart synoterm
+grep SYNOTERM_CONFIG /var/packages/synoterm/target/ui/web/config.js
+```
+
+Caveat: those probes are cross-port requests from the `:5001` page, so the
+browser must already trust the rule's certificate — accept
+`https://<nas>:<proxyPort>/synoterm/` once in a tab, or assign DSM's certificate
+to the rule (*Login Portal → Certificate → Settings*). A certificate error in a
+background request is silent, and the window then reports that no backend is
+reachable.
+
+`proxyOrigin` is the escape hatch for a hostname that differs from the one DSM is
+opened with (e.g. a DDNS name): set it to the absolute origin in `config.js`.
+
 ### 4.3b `AUTH="ssh"`: who authenticates
 
 ```
@@ -287,9 +335,20 @@ browser ──WSS──▶ nginx (reverse proxy) ──▶ synoterm ──▶ ss
   `/usr/local/bin/ssh`; override with `--ssh-bin` / `SYNOTERM_SSH_BIN`), running
   as the unprivileged package user — no setuid, no `authenticate.cgi`, no
   `id`/group lookup for the target account, no DSM API.
+* `ssh -o IdentityFile=none -o PubkeyAuthentication=no` — no key is ever
+  considered or offered. `IdentityFile=none` is the essential one: OpenSSH 8.2
+  (DSM 7.1) builds the *default* identity list from the service user's passwd
+  home before it looks at auth options, and that home is
+  `root:synoterm 0700`, so every key type prints `load pubkey "…/id_rsa":
+  Permission denied` (twice: plain pass + certificate pass) before the password
+  prompt. `PubkeyAuthentication=no` and `IdentitiesOnly=yes` do **not** suppress
+  it on 8.2p1 (measured). A client key cannot help anyway — it would have to be
+  authorised in the target account's `authorized_keys`.
 * `ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts`
   records the loopback host key on first use. `$HOME` is
-  `$SYNOPKG_PKGVAR/home` (mode 700).
+  `$SYNOPKG_PKGVAR/home` (mode 700); `start` deletes a `known_hosts` the service
+  user cannot write (e.g. one created by a manual root run), because
+  `accept-new` cannot append to it.
 * `ControlMaster=auto ControlPath=$HOME/.ssh/cm-%C ControlPersist=600` keeps one
   authenticated connection for 10 minutes, so a second tab does not ask for the
   password again. `SSH_CONTROL_PERSIST="0"` disables it.
@@ -515,6 +574,9 @@ The values come from `$SYNOPKG_PKGVAR/etc/synoterm.conf` (`AUTH` defaults to
 whenever a contrib snippet is installed.
 
 * `status` must exit `0` when running and `3` when stopped (DSM convention).
+* `start` also rewrites `$SYNOPKG_PKGDEST/ui/web/config.js` from
+  `AUTH`/`BASE_PATH`/`PROXY_HTTPS_PORT`, because DSM serves that copy of the UI
+  itself (§4.3a).
 * The pid file lives in `$SYNOPKG_PKGVAR/runtime` (writable).
 * `postinst` creates `$SYNOPKG_PKGVAR/home`, `home/.ssh` (ssh known_hosts and
   the ControlMaster socket) and `runtime`, all `0700`.
